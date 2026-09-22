@@ -4606,10 +4606,29 @@ distinct pick — the v2 band-only render dropped the exact post_rel and
 post_v the structured head reads; the render is the bottleneck, recorded
 as the render-side finding the plan asked for).
 
+Follow-up (Issue 876, Bench 882 — the flappy render widened to v3):
+option sentences gained a quantized OFFSET clause (fine post_rel, clamped
+±2) + a NEUTRAL post-motion clause (kinematic wording — the v1
+"rising"-style value-loaded motion was the measured Bench 880 confound;
+the structural caveat stands: post_v is action-determined here, so the
+clause inherently names the action — the neutral wording + the offset
+anchor are the measured defense, and the new oracle did NOT degenerate:
+48/52 flap/coast split, zero ties). Over the IDENTICAL 100-state set, the
+decoded arm (fills reconstructed into the structured units — exact
+post_rel for |rel| ≤ h, tails at ±(h+1), post_v exact, pre_rel band-clamped)
+went **77 → 96/100, Δ0 vs the structured arm (96/96, 4/100 flips)** —
+G1 HOLDS with the discrimination floor PASS: the decode is lossless
+ENOUGH for the decision on flappy. Measured on the way: the same v3
+corpus through raw fill ORDINALS reads 51/100 (below the constant-pick
+52) — the ordinal encoding cannot represent the band×offset joint; the
+structured-units reconstruction is the landed design.
+
 🔧 Feature flag: `template_decode = []` (katgpt-core) — opt-in,
 independent of `state_option_scoring` (a decode consumer need not
 score); root forward for the `decode_01_losslessness` example (both
 features). Test-gate row `katgpt-core:2074:template_decode`.
 
 📖 Plan: [607](../../.plans/607_modelless_game_lane.md) ·
-Bench: [881](../../.benchmarks/881_template_decode_losslessness.md).
+Bench: [881](../../.benchmarks/881_template_decode_losslessness.md) ·
+Follow-up: [882](../../.benchmarks/882_flappy_v3_render_widening.md)
+(Issue 876).

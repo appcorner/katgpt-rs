@@ -8885,3 +8885,42 @@ mechanism verdict needs a trunk with headroom"). Both halves were closed by this
   `.benchmarks/850_probe_guidance_headroom_study.md`.
 
 Session: katgpt-rs-865-followup, 2026-09-22
+
+
+## Issue 876 (2026-09-23) — the flappy render widened to v3; the decoded arm reads Δ0 vs the structured arm: CLOSED
+
+Bench 881's losslessness arm found the flappy v2 render too coarse for
+decode-based consumption (decoded arm 77/100 = constant-pick, ONE distinct
+pick). The fix was render-side, per the issue's two candidates, landed as
+grammar v3 (`laya-flappy-v3`): a quantized OFFSET clause (fine post_rel,
+clamped ±2) + a NEUTRAL post-motion clause (kinematic "drifting"/"holding"
+wording — the v1 "rising"-style value-loaded motion was the measured Bench
+880 confound). The structural caveat (post_v is action-determined, so the
+clause names the action) is stated in the grammar docs and the fixture
+meta; the measured defense held — the v3 oracle split 48 flap / 52 coast
+with zero p ties, no constant-flap degeneration.
+
+- **The oracle fixture was regenerated over the IDENTICAL 100-state set**
+  (same seed, same exclusions — asserted state-by-state against the v2
+  record), so the delta isolates the render. Oracle: riir-reflex
+  `laya_oracle_batch` @ `63b1552`, run in an isolated worktree with the G5
+  parity gate re-verified green at that exact commit before the run.
+- **The gate is MET with the stronger outcome: Δ0.** Structured arm
+  96/100 (in + LOO); decoded arm — fills reconstructed into the STRUCTURED
+  UNITS (exact post_rel for |rel| ≤ h, crash tails at ±(h+1), post_v exact,
+  pre_rel band-clamped) — 96/100 (in + LOO), 4/100 flips, distinct 2.
+  G1 HOLDS, discrimination PASS; both v3 head digests pinned in full.
+- **The decoded feature design is part of the measurement**: the first v3
+  decoding (raw fill ordinals) read 51/100, BELOW constant-pick — a linear
+  head over ordinals cannot represent the band×offset joint. Both designs
+  are recorded; the structured-units reconstruction (the lanes anchor's
+  pattern) is the landed one.
+- **The v2 record is untouched**: `render_option_sentence_v2` frozen +
+  pinned by a literal-string test; `flappy_02_arena` replays the v2
+  fixture byte-identically; the Bench 880/881 anchors still assert.
+- Full record: `.benchmarks/882_flappy_v3_render_widening.md` · fixtures
+  README (the v1 → v2 → v3 grammar history) · Catalog §125. Code +
+  fixture landed at `515230244`; this entry + the issue-file removal are
+  the docs commit of the same landing.
+
+Session: katgpt-rs-876-flappy-v3, 2026-09-23
