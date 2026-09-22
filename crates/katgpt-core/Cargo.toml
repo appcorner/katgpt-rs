@@ -136,7 +136,13 @@ statrs = "0.17"
 # wasm32-clean. T2 consumer SHIPPED as the combined-gate
 # renoise_ce_score_horizon (Bench 877: precision@k 1.000 vs incumbent
 # 0.906 at −0.8% latency); the feature itself stays OPT-IN — promotion is
-# T5's verdict on the recorded GOATs.
+# T5's verdict on the recorded GOATs. T3 rides the same gate (2026-09-23,
+# Bench 883): TimeAnnealRange — the iteration-indexed [0.02,0.98] →
+# [0.02,0.70] late-iteration sampling-range anneal + the zero-terminal-
+# weight truncation predicate (t_cut = T − (T−t_min)·√ε) — with the
+# dllm_solver consumer seam (annealed_renoise_range / renoise_level_
+# skippable) behind the same feature; the quality gate runs cross-repo on
+# the riir-train C9 toy (shared fixture consumed in place).
 horizon_weights = []
 # renoise_ce_surprise (Issue 875 T4 / Research 582, 2026-09-23): the
 # target-anchored renoise-CE probe mode — PFD's resolve-against-the-teacher

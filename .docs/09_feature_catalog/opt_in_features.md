@@ -4572,6 +4572,37 @@ consumer wiring up.
 📖 Bench: [879](../../.benchmarks/879_renoise_surprise_goat.md) ·
 Issue: [875](../../.issues/875_pfd_horizon_weighting_target_anchored_probe.md).
 
+## 126. horizon_weights (T3 layer) — time-annealed sampling ranges + the closed-form truncation predicate (Issue 875 T3 / Research 582)
+
+The schedule layer of the T1 substrate: `TimeAnnealRange` — the paper's
+iteration-indexed sampling-range anneal `[0.02T, 0.98T] → [0.02T, 0.70T]`
+over the last 30% of iterations (ceiling eases linearly, floor FIXED:
+low-noise observations carry the law's max weight and are never traded
+away; orthogonal to `dllm_solver`'s state-indexed entropy switching) —
+plus the zero-terminal-weight truncation predicate IN CLOSED FORM:
+`ε = ((T−t_cut)/(T−t_min))²`, inverse `t_cut = T − (T−t_min)·√ε`. The
+paper's own [0.02, 0.70] IS the predicate at ε ≈ 0.0937 — a caller can
+now PRICE any range truncation exactly BEFORE skipping. Consumer seam in
+`dllm_solver` (`annealed_renoise_range` + `renoise_level_skippable`)
+behind the combined gate `critical_interval_gate` + `horizon_weights`.
+
+Cross-repo quality gate (release, 3 arms, gate_full): flat 0.4084 (=
+C9's recorded number — behavior-preserving) / AnnealRenorm 0.4263 (+4.4%,
+within the not-worse bar) / AnnealPlain 0.4451 (**+9.0% W1 for 9.37% mass
+dropped — the corollary's cost law measured: first-order cost ∝ mass
+dropped**). Regime boundary: safe-not-a-win on the two-ring toy (no fine
+detail to exploit); the fine-detail claim routes to riir-train 569 C5,
+mechanically unblocked by this landing. Latency 3.76 ns/op
+(once-per-iteration class).
+
+🔧 Feature flag: rides `horizon_weights` (katgpt-core) — the T3 layer is
+the law's own schedule realization; the seam adds the combined gate. Opt-in
+per the no-default-consumer rule; the C9 toy's `pfd_anneal` forwarding
+feature (riir-train) consumes it.
+
+📖 Bench: [883](../../.benchmarks/883_time_anneal_t3_goat.md) ·
+Issue: [875](../../.issues/875_pfd_horizon_weighting_target_anchored_probe.md) (CLOSED).
+
 ## 125. template_decode — bounded template decode over closed sentence grammars (Plan 607 T2)
 
 A closed grammar is a fixed table of templates — literal segments

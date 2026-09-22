@@ -1,3 +1,23 @@
+## 2026-09-23 — Issue 875 T3 CLOSED (+ the issue): time-annealed sampling ranges + the closed-form truncation predicate (Bench 883)
+
+The last open task of the PFD modelless arm. `TimeAnnealRange` + the
+zero-terminal-weight truncation predicate (`ε = ((T−t_cut)/(T−t_min))²`,
+inverse `t_cut = T − (T−t_min)·√ε`) shipped in `horizon_weights`; the
+`dllm_solver` seam (`annealed_renoise_range` / `renoise_level_skippable`)
+behind the combined gate; the quality gate ran CROSS-REPO on the riir-train
+C9 toy (TRangeMode remap, fixture consumed in place — no second copy of
+the frozen bytes; the deviation from C9's "vendors" note is recorded in
+the bench). Headline numbers (release, gate_full): flat 0.4084 = C9's
+recorded PFD (behavior-preserving refactor); AnnealPlain +9.0% W1 for
+9.37% mass dropped — **the truncation corollary's cost law measured**;
+AnnealRenorm +4.4% (within the not-worse bar, ring2 kept) with the honest
+regime boundary: the two-ring toy has no fine detail to exploit, so the
+anneal is safe-not-a-win HERE and the paper's fine-detail claim routes to
+riir-train 569 C5 (mechanically unblocked). Validated in an 8-worktree
+redirect harness (the shared main checkouts were sibling-blocked mid-
+flight; the harness runs the REAL katgpt-core symbol — provenance in the
+bench). Issue 875 now CLOSED: all five tasks, all arms OPT-IN per T5.
+
 ## 2026-09-22 — Plan 607 ACCEPTED + T0a/T4a/T0b landed: the modelless game-decision lane's first three tasks (substrate gate, the laya-Tetris enumerator, the G1-oracle fixture)
 
 The owner accepted the plan ("607 accepted") and the first three tasks of

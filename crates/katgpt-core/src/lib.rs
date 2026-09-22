@@ -810,6 +810,7 @@ pub mod horizon_weights;
 pub use horizon_weights::{
     HorizonWeightTable, HORIZON_WEIGHT_GRID, pfd_horizon_weight_at, pfd_horizon_weights,
     remaining_horizon_t_sample, remaining_horizon_weight, remaining_horizon_weights,
+    TimeAnnealRange, terminal_truncation_ceiling, truncated_w_mass_fraction,
 };
 
 #[cfg(feature = "dual_leo")]
