@@ -1,3 +1,31 @@
+## 2026-09-23 — Issue 867 CLOSED (+ the issue): the non-hidden-state canonical-AST construction — G5 returned NO attributable signal; instrument-broken, not claim-refuted
+
+T1–T3 all landed; T4/T5 are dead branches by their own conditions. T1
+`65b199b0` (the 38-bin `source_features` AST-histogram extractor, opt-in
+`canon_source_features`) and T2 `67884461` (`SourceFeatureAdapter` ridge
+fit + zero-alloc apply) shipped in `katgpt-canon`. T3 — the decisive G5
+cross-arch gate — ran riir-train-side at [Bench
+605](../../riir-train/.benchmarks/605_issue567_g5_source_features_gate.md)
+(harness riir-train `48623505`, corpus `49a4a72f`): PRIMARY
++0.50..0.55 at k∈{2,4,8,16}, **but the fit-time shuffle null manufactures
++0.41..0.44 on its own** (within ~1σ of PRIMARY at every k, clearing the
++0.3 signal bar by itself) — no rung is attributable to the construction.
+
+Why the file closes: T4's own condition ("fires only if the control passes
+AND G5 fails") did not fire — the control failed, which is *instrument
+broken, never claim closed* (the issue-825 clause); T5 needs T3's >+0.3
+attributable rung, which does not exist. Both remaining tasks are
+permanently non-executable; the tracker is complete.
+
+Durable findings kept: the models share a real **aggregate** contrast
+direction (AGGo to +0.44 at k=16, noisy) with weak pair-specific observed
+correspondence (OBS +0.16..0.22 vs its own null +0.11..0.18). Reopen paths
+live in Bench 605 §Verdict(6): an observed-level gate with the fit-time
+null mandatory, an intervention study, and/or a corpus at
+gemma-reliability-adequate scale. Reopen authority: Research 459 (CLOSED
+2026-07-27 — reopens only on a non-hidden-state construction). Proposal 010
+remains the G5-bar authority document.
+
 ## 2026-09-23 — Issue 875 T3 CLOSED (+ the issue): time-annealed sampling ranges + the closed-form truncation predicate (Bench 883)
 
 The last open task of the PFD modelless arm. `TimeAnnealRange` + the
