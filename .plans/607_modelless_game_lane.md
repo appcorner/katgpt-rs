@@ -454,6 +454,35 @@ per-decision laya outputs are generatable LOCALLY (riir-reflex's G5-parity
   modelless-legal (search is not learning) but low value-per-effort. File
   a `.research/` note only if T4's oracle replay shows the argmax scorer
   losing decisions to laya on multi-step lookahead.
+- [x] **T8 — the LIVE arena on reflex.gist.rs (owner addendum, 2026-09-23,
+  "still see no tetris running side by side at reflex.gist.rs like
+  original, what block?")**: the plan's arenas were OFFLINE benches
+  (numbers only — the T6 law) and the site had no games; the owner asked
+  for the original laya page's live-Tetris experience. Two-sided landing:
+  **riir-reflex** (`ea197d8` + `536d65f`) — the laya comparison lane over
+  HTTP behind `RIIR_REFLEX_LAYA=1`: `X-Reflex-Lane: laya` on `/decide`,
+  served by the SAME G5-parity RiirAgent through a one-thread actor (the
+  backend is !Send; forwards serialize), fail-closed in every non-ready
+  state (never a silent modelless fallback — the per-lane-claims law),
+  `/healthz` lane map JSON, PNA preflight consented for allow-listed
+  origins, mapping unit-tested weights-free (12 lane tests; clippy clean
+  at default/all-features/no-default; the pre-existing
+  `harness_families_gates` G2 red at HEAD is box-load, reproduced on a
+  clean tree at load 18-34).
+  **reflex-site** (`60bd192` + `4eba4aa` + `c7aa731` + `20388c9`, deployed
+  live) — `/arena/`: Tetris + Flappy + three-lanes, TWO boards side by
+  side (laya | modelless) from the same seeded stream; the games are the
+  exact JS ports of the T4a/T5 sims + pinned grammars, golden-checked
+  node-side against the committed fixtures (tetris 2660/2660 options +
+  120/120 state sentences; flappy/lanes 100/100 each — byte-identical),
+  plus a bit-exact fastrand port (`rng.js`). Verification: a fixture
+  replay through the LIVE HTTP lane agrees with the committed oracle
+  p_cleans spot-level and argmax-level (`arena_protocol_check.mjs`); the
+  production page smoke passes in headless Chromium (chips ready,
+  modelless decision p50 3-6 ms, laya board reading spots). Boundary
+  note: the engine stays game-free — the game lives in the site JS, the
+  engine answers English noul sentences (the T0b `laya_oracle_batch`
+  precedent: game vocabulary in the INPUT data).
 
 ## Substrate check (substrate-first skill, T0a — 2026-09-22)
 
