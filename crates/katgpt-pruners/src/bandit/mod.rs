@@ -1221,30 +1221,55 @@ impl<P: ScreeningPruner> ScreeningPruner for BanditPruner<P> {
 
 // ── Beta Distribution Sampling ──────────────────────────────────
 
-/// Sample from Beta(α, β) distribution using Jöhnk's algorithm.
+/// Sample from Gamma(shape, 1) using the Marsaglia–Tsang method.
 ///
-/// Works well for α, β ≥ 1 (our case: posterior with +1 pseudocounts).
-/// Uses rejection sampling. Falls back to 0.5 after 256 rejections.
+/// Shapes below one use the standard boost-and-transform identity:
+/// Gamma(a, 1) = Gamma(a + 1, 1) * U^(1/a).
+fn sample_gamma(shape: f32, rng: &mut Rng) -> f32 {
+    debug_assert!(shape > 0.0, "Gamma shape must be > 0, got {shape}");
+
+    if shape < 1.0 {
+        let gamma = sample_gamma(shape + 1.0, rng);
+        let uniform = rng.uniform().max(f32::EPSILON);
+        return gamma * uniform.powf(1.0 / shape);
+    }
+
+    let d = shape - 1.0 / 3.0;
+    let c = (9.0 * d).sqrt().recip();
+
+    loop {
+        let x = rng.normal();
+        let v = 1.0 + c * x;
+        if v <= 0.0 {
+            continue;
+        }
+
+        let v3 = v * v * v;
+        let uniform = rng.uniform().max(f32::EPSILON);
+
+        // Marsaglia–Tsang squeeze followed by the full acceptance test.
+        if uniform < 1.0 - 0.0331 * x.powi(4)
+            || uniform.ln() < 0.5 * x * x + d * (1.0 - v3 + v3.ln())
+        {
+            return d * v3;
+        }
+    }
+}
+
+/// Sample from Beta(α, β) via independent Gamma(α, 1) and Gamma(β, 1).
+///
+/// Unlike the former bounded-retry Jöhnk sampler, this remains usable for
+/// concentrated posteriors with alpha/beta in the hundreds or thousands and
+/// has no deterministic midpoint fallback.
 fn sample_beta(alpha: f32, beta: f32, rng: &mut Rng) -> f32 {
-    // Uniform prior: α=1, β=1
+    // Uniform prior: Beta(1, 1) = Uniform(0, 1).
     if (alpha - 1.0).abs() < f32::EPSILON && (beta - 1.0).abs() < f32::EPSILON {
         return rng.uniform();
     }
 
-    // Jöhnk's algorithm: X = U1^(1/α), Y = U2^(1/β), accept if X+Y ≤ 1
-    for _ in 0..256 {
-        let u1 = rng.uniform().max(f32::EPSILON);
-        let u2 = rng.uniform().max(f32::EPSILON);
-        let x = u1.powf(1.0 / alpha);
-        let y = u2.powf(1.0 / beta);
-        let sum = x + y;
-        if sum <= 1.0 && sum > 0.0 {
-            return x / sum;
-        }
-    }
-
-    // Fallback: Q-value midpoint
-    0.5
+    let x = sample_gamma(alpha, rng);
+    let y = sample_gamma(beta, rng);
+    x / (x + y)
 }
 
 // ── AbsorbCompress Integration ──────────────────────────────────

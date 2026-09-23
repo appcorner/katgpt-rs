@@ -1160,3 +1160,90 @@ mod skill_lifecycle_tests {
         assert!(bp.pruner_memory().verify_identity("bandit"));
     }
 }
+
+#[test]
+fn test_beta_sampler_range_and_non_degenerate() {
+    let pairs = [
+        (1.0, 1.0),
+        (2.0, 5.0),
+        (5.0, 2.0),
+        (20.0, 20.0),
+        (100.0, 50.0),
+        (564.0, 349.0),
+        (1000.0, 1000.0),
+    ];
+
+    for (alpha, beta) in pairs {
+        let mut rng = Rng::new((alpha as u64) * 1000 + beta as u64);
+        let samples: Vec<f32> = (0..512)
+            .map(|_| sample_beta(alpha, beta, &mut rng))
+            .collect();
+
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.is_finite() && (0.0..=1.0).contains(sample)),
+            "invalid Beta({alpha}, {beta}) sample"
+        );
+        assert!(
+            samples
+                .iter()
+                .any(|sample| (*sample - 0.5).abs() > f32::EPSILON),
+            "Beta({alpha}, {beta}) collapsed to 0.5"
+        );
+    }
+}
+
+#[test]
+fn test_beta_sampler_mean_sanity() {
+    let cases = [
+        (8.0, 2.0, 0.8),
+        (6.0, 4.0, 0.6),
+        (564.0, 349.0, 564.0 / 913.0),
+    ];
+
+    for (alpha, beta, expected) in cases {
+        let mut rng = Rng::new(alpha as u64 * 37 + beta as u64);
+        let samples = 10_000;
+        let mean = (0..samples)
+            .map(|_| sample_beta(alpha, beta, &mut rng))
+            .sum::<f32>()
+            / samples as f32;
+        assert!(
+            (mean - expected).abs() < 0.02,
+            "Beta({alpha}, {beta}) mean {mean} differs from {expected}"
+        );
+    }
+}
+
+#[test]
+fn test_beta_sampler_large_posterior_is_not_midpoint_fallback() {
+    let mut rng = Rng::new(42);
+    let samples: Vec<f32> = (0..512)
+        .map(|_| sample_beta(564.0, 349.0, &mut rng))
+        .collect();
+    let midpoint_count = samples
+        .iter()
+        .filter(|sample| (**sample - 0.5).abs() <= f32::EPSILON)
+        .count();
+
+    assert!(midpoint_count < samples.len() / 2);
+    assert!(samples.iter().any(|sample| (*sample - 0.5).abs() > 0.05));
+}
+
+#[test]
+fn test_thompson_no_longer_collapses_to_last_arm() {
+    let seeds = [42, 43, 44, 45, 46, 999];
+
+    for seed in seeds {
+        let env = BernoulliEnv::new(&[0.2, 0.5, 0.8, 0.4, 0.6]);
+        let session = BanditSession::new(env, BanditStrategy::ThompsonSampling);
+        let (_, result) = session.run(1000, &mut Rng::new(seed));
+
+        assert!(
+            result.visits[4] < 900,
+            "seed {seed}: Thompson still collapsed onto Arm 4: {:?}",
+            result.visits
+        );
+    }
+}

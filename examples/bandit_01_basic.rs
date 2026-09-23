@@ -52,7 +52,7 @@ use katgpt_rs::speculative::ScreeningPruner;
 use katgpt_rs::types::Rng;
 
 const EPISODES: usize = 1000;
-const SEED: u64 = 42;
+const SEED: u64 = 999;
 
 // ── Domain Pruner: Action Masking ──────────────────────────────
 
