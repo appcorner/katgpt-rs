@@ -53,7 +53,10 @@ use super::simd_level;
 use crate::{GROUP_SIZE, TernaryGroupWeights};
 
 /// Blocks per group. `GROUP_SIZE / 64` — exactly 2 at the shipped group size.
-#[cfg(feature = "ternary_group_scale")]
+/// Consumed only by the arch kernels (neon on aarch64, avx2 on x86_64) — the
+/// scalar/wasm32 paths walk `>> 6` directly, so on other triples this is dead
+/// and must not compile.
+#[cfg(all(feature = "ternary_group_scale", any(target_arch = "aarch64", target_arch = "x86_64")))]
 const BLOCKS_PER_GROUP: usize = GROUP_SIZE / 64;
 
 /// Scalar reference: `y[r] = Σ_g group_scale[r,g] · Σ_{col∈g} sign(col) · x[col]`
@@ -1021,7 +1024,9 @@ mod tests {
     fn group_geometry_matches_group_size() {
         let w = TernaryGroupWeights::new(2, 300);
         assert_eq!(GROUP_SIZE, 128);
-        assert_eq!(BLOCKS_PER_GROUP, 2);
+        // BLOCKS_PER_GROUP is gated to the arch kernels' triples (aarch64/x86_64);
+        // assert its VALUE everywhere via the definition instead of the const.
+        assert_eq!(GROUP_SIZE / 64, 2);
         assert_eq!(w.blocks64, 300usize.div_ceil(64));
         assert_eq!(w.groups_per_row, 300usize.div_ceil(128));
         // 2.125 bits/weight: 2 planes * 8B/64w + 2B/128w.

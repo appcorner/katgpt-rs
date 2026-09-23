@@ -46,8 +46,11 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use super::simd_level;
-use super::SimdLevel;
+// x86_64-only: the sole consumer is pdep_arm_available() below. Ungated here
+// would warn unused on every non-x86_64 lane; ungated in the fn body would
+// not compile on this arm. (The AGENTS.md x86_64 sibling-arm lesson.)
+#[cfg(target_arch = "x86_64")]
+use super::{simd_level, SimdLevel};
 use crate::bitcos::BitcosWeights;
 use crate::GROUP_SIZE;
 
