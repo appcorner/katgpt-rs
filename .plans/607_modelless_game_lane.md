@@ -484,6 +484,48 @@ per-decision laya outputs are generatable LOCALLY (riir-reflex's G5-parity
   engine answers English noul sentences (the T0b `laya_oracle_batch`
   precedent: game vocabulary in the INPUT data).
 
+## T9 addendum — the owner ask round 2: "still not see tetris on reflex.gist.rs" (2026-09-23)
+
+- **The block, measured:** the arena WAS live at `/arena/` (200, both
+  boards, engine detection + PNA hint) — but (a) the homepage carried it
+  only as a small nav item on a long page, and (b) without a locally
+  running engine the boards idled on "checking for a local engine…".
+  The user opened the root URL twice and saw no games either time. Not a
+  build gap this round — a discoverability + cold-start gap.
+- **Fix 1 — recorded demo (reflex-site `b098ade`, deployed live, version
+  `433a1293`):** with no engine, `/arena/` now auto-plays a labelled
+  recorded demo. Data: `arena/demo_oracle.json` (102 KB) generated from
+  the SAME committed fixtures the golden tests bind. Tetris replays the
+  fixture's recorded play walk — chain-verified at generation time
+  (every recorded placement reproduces the next recorded board under the
+  site's own enumeration; 36 turns; mixed capture policy disclosed in
+  the banner — the walk was state collection, not argmax play, 16/35
+  picks are argmax). Flappy/lanes ship as recorded decision reels (the
+  fixture states come from `enumerateStates`, a DIFFERENT rng stream
+  than the live boards' `play_game` shape — a self-driving demo would
+  miss the oracle, so the reels replay the recorded states directly).
+  The modelless board plays its real out-of-the-box behavior: abstain →
+  labelled random fallback. Board heads relabelled "laya lane ·
+  model-based" / "modelless lane · reflex core" (the owner's own
+  vocabulary); homepage gained an arena teaser section (`d210399`) with
+  the live/recorded split spelled out.
+- **Verification:** `scripts/arena_demo_check.mjs` (node, PASS — walk
+  chain + 100+100 reel sentence/option/argmax parity vs fixtures),
+  `scripts/arena_demo_smoke.mjs` (headless Chromium with
+  `127.0.0.1:7331` ROUTE-BLOCKED — deterministic even on a box where a
+  sibling's engine is up; PASS local + re-proven against the live prod
+  URL post-deploy), golden tests 8/8 still green, prod curl markers on
+  all four surfaces.
+- **Honesty law kept:** the demo is labelled everywhere (banner, status
+  text, SOURCE readout "· demo", "recorded play" answers, footnote
+  rewritten to scope "nothing is scripted" to the live path). Recorded
+  probabilities are 6-dp — 4 orders finer than the ±0.02 protocol-check
+  tolerance; argmax parity verified 100/100 on both reels.
+- **Live-path note:** the v0.1.1 release archives predate the laya lane,
+  so a visitor following the run command with a stock install sees the
+  laya board fail closed with the enable hint (modelless goes live
+  fine); the v0.1.2 cut in flight carries the lane.
+
 ## Substrate check (substrate-first skill, T0a — 2026-09-22)
 
 - Searched for: option scoring, centroid cosine, corpus routing, typed
