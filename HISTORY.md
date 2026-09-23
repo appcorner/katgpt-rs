@@ -1,3 +1,47 @@
+## 2026-09-23 — Issue 877 CLOSED (merge `b701cf564`): the main↔develop sync — origin/main merged into develop with `-s ours`, zero content delta, ancestry restored
+
+main was NOT an ancestor of develop: three main-only commits over merge-base
+`37bb9cbf8`, all transplants of develop's own work (main's own HISTORY said so —
+"Cherry-picked onto main from develop `8da93896`"): `569daf98e` lthash primitive
+(twin of develop `8da938961` + lint fix `b85bda6e6`), `3c844aebb` lthash wiring
+(twin of the wiring inside `8da938961`), `5e2b730f2` exact_sigmoid/dot_f32_ordered
+(twin of develop `5458dd69b`, evolved by `da89c386b` + `a36895e32` Issue 861 +
+`9b09783d9` Issue 870). `git merge-tree` measured 11 conflicted files, 2 clean
+auto-merges, 3 byte-identical adds; develop-vs-merge-tree diff was exactly those
+11, and every main-side hunk existed on develop in evolved form (highwaters 876/883
+vs 807/844; `lthash.rs` let-chains fix; `dot.rs` len-16 x86_64-matrix pin;
+README 641/204 counts vs main's 594→595; the avx2 n-clamp and plasma_dispatch/bitcos
+on the auto-merge side; the duplicate-`exact_sigmoid` trap checked and refuted).
+
+The merge (`b701cf564`, parents `9ef11a3eb` + `5e2b730f2`) therefore changes ZERO
+content vs develop — it exists to make main an ancestor. Strategy `-s ours` (not
+`-X ours`, which only resolves conflicting hunks ours-ward and still merges
+non-conflicting main content — the tripwire `HEAD^{tree} == HEAD^1^{tree}` reds on
+exactly that mis-invocation). Pushed `--atomic origin develop HEAD:main` (one
+transport, both-or-neither; main CI fires once on the final state — owner-accepted:
+the 279-commit range matches every path filter, so docs_gate / full_gate (macOS 10×
+minute multiplier) / required_features_touched / lean_proofs / wasm32_gate run — the
+only automatic whole-repo lane this content has ever had; a red there is a true
+finding about develop, not a merge defect).
+
+Recovered-by-history note: 10 files (`.issues/747_…`–`756_…`) exist on main and not
+on develop — all present at merge-base, deleted on develop under the noise-reduction
+rule, their records in this file + git history. The 3 main-only commits touch nothing
+under `.issues/` but `.highwater`. A future main↔develop diff will show them as
+"missing on develop"; that is the record, not a loss.
+
+Durable instrument lessons (would each have cost an hour): (1) **merge-tree hashes
+are spelling-bound** — `git merge-tree --write-tree A B` labels its conflict markers
+with the ref spellings passed (`<<<<<<< HEAD` vs `<<<<<<< develop`), so the blob
+bytes and tree hash are functions of spelling, not just content; three spellings of
+one commit pair produced three different trees, each deterministic. Never quote a
+merge-tree hash as a pin — quote the FILE SET. (2) **a pin measured before the commit
+carrying it is already stale** — the develop tree hash `4ad737a9…` was measured,
+then written into the issue-amendment commit, which itself moved the tree; the
+surviving form is self-referential (`HEAD^{tree}` vs `HEAD^1^{tree}`), which cannot
+go stale. Adjudication: Claude verdict, 3 rounds (REVISE → REVISE → AGREE), round 2
+catching the stale pin and the merge-tree variance mechanism.
+
 ## 2026-09-23 — Issue 867 CLOSED (+ the issue): the non-hidden-state canonical-AST construction — G5 returned NO attributable signal; instrument-broken, not claim-refuted
 
 T1–T3 all landed; T4/T5 are dead branches by their own conditions. T1
