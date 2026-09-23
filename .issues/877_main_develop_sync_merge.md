@@ -42,19 +42,25 @@ Byte-identical adds (no action): `bench_lthash.rs`, `bench_844_exact_sigmoid_ord
 `activations.rs` at different hunks → textual auto-merge with two definitions) is REFUTED —
 the merge-tree result has exactly one `exact_sigmoid`/`exact_sigmoid_f64`, at develop's lines.
 
-## Execution plan
+**Not-a-loss note (verdict round 1 finding):** 10 files (`.issues/747_…`–`756_…`) exist on
+main and not on develop — all present at merge-base, deleted on develop under the
+noise-reduction rule (their records live in HISTORY.md + git history). The 3 main-only
+commits touch nothing under `.issues/` but `.highwater`. Nothing is lost by keeping them
+deleted; recorded here so a future main↔develop diff is not misread.
 
-- [ ] File this issue + bump `.issues/.highwater` to 877 (dual_allocation_gate: 0 collisions, run)
-- [ ] Claude verdict on the resolution + push posture
-- [ ] `git merge --no-ff --no-commit origin/main` on develop
-- [ ] `git checkout --ours` all 11 conflicted files, `git add`
-- [ ] Validate A: `git diff develop HEAD --stat` **EMPTY** (byte-identity proof)
-- [ ] Validate B: `git merge-base --is-ancestor origin/main HEAD`
-- [ ] Validate C: scoped `cargo check -p katgpt-core --lib` (isolated target dir) — belt-and-suspenders; tree is byte-identical to the green origin/develop HEAD, so this is expected to pass trivially
-- [ ] Merge commit (references this issue, Session marker in body)
-- [ ] Fast-forward local `main` (279 stale) to the merge commit
-- [ ] ONE push: `git push origin develop main` (main CI fires once, on the final state — owner-accepted)
-- [ ] Close: HISTORY.md row citing the merge sha, remove this file, `docs:` commit (same push or follow-up push of develop only)
+## Execution plan (amended per Claude verdict round 1 — REVISE adopted in full)
+
+- [x] File this issue + bump `.issues/.highwater` to 877 (dual_allocation_gate: 0 collisions, run)
+- [x] Claude verdict round 1 — REVISE: instrument changed to `-s ours`, validation changed to tree-hash equality, cargo check dropped, atomic push, 747–756 close-out row added. D1/D2/D3 otherwise confirmed.
+- [ ] Amend issue commit with the revisions
+- [ ] `git merge -s ours --no-ff origin/main` on develop — zero working-tree churn in the shared worktree; the ours-everywhere target is made true by construction (the per-file adjudication above was measured beforehand via merge-tree `1c847935`/`a8a57a05`, `diff HEAD <tree>` = exactly the 11 files)
+- [ ] Validate (non-vacuous): `git rev-parse HEAD^{tree}` == develop tree `4ad737a944e54f3b25b15d2b69a5e56c2bc42a00` — under `-s ours` a `git diff` check cannot fail and proves nothing; the tree-hash equality against the independently measured develop tree is the real pin
+- [ ] Validate: `git merge-base --is-ancestor origin/main HEAD`
+- [ ] ~~Scoped `cargo check`~~ DROPPED per verdict: the tree is byte-identical to origin/develop's; a build re-derives a fact the tree hash settles
+- [ ] Merge commit (references this issue, names twin commits `569daf98e`/`3c844aebb`/`5e2b730f2` + tree hashes in body, Session marker)
+- [ ] ONE push: `git push --atomic origin develop HEAD:main` — both-or-neither; moves origin/main `5e2b730f2` → merge commit (fast-forward). Cost accepted per owner ("dont mind about main ci"): the 279-commit push range matches every path filter, so docs_gate / full_gate (macos-latest, 10× minute multiplier) / required_features_touched / lean_proofs / wasm32_gate fire once — the only automatic whole-repo lane this content has ever had (nothing fires on develop). A red there is a true finding about develop, not a merge defect.
+- [ ] Fast-forward local `main` (a0ef5d68, 279 stale, confirmed ancestor of origin/main) to the merge commit
+- [ ] Close: HISTORY.md row citing the merge sha + the **10 recovered-by-history issue files (`.issues/747–756`)** — present on main, deleted on develop under the noise-reduction rule, present at merge-base; a future reader diffing main against develop would see them as "missing on develop" and the record pre-empts that. Remove this file, `docs:` commit.
 
 ## Risk notes
 
