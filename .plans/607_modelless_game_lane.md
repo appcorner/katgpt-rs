@@ -599,3 +599,20 @@ per-decision laya outputs are generatable LOCALLY (riir-reflex's G5-parity
   faster, kernel maturity), riir CPU 188.7 ms at candle-CPU parity; our
   wins are deployment (one SHA-pinned binary, no Python, no torch,
   offline).
+
+## T10 addendum — the serving consumer (riir-reflex v0.2.2, 2026-09-23)
+
+The decoded heads now SERVE: riir-reflex v0.2.2 (`367766c` + `932a2a3`,
+Plan 001 in that repo's `.plans/001_game_head_serving.md`) boots the
+decoded Tetris head (this plan's Bench 881 anchors — λ=1, 44/120 in+LOO —
+reproduced bit-identically by that repo's tests, serving digest
+`00aa6221…c6e`) from a verbatim BLAKE3-pinned copy of this repo's
+`tests/fixtures/tetris_oracle_laya_en_v2.jsonl`, and answers the pinned
+spot question on `/decide` before its cosine engine's abstain. The arena's
+modelless Tetris board plays out of the box (reflex.gist.rs/arena, site
+`b09bffb`). Lanes + flappy remain honest abstains in that repo — the
+cross-lane feature dependency (this plan's lanes grammar reads the other
+lanes) and the site's frozen v2 flappy render are the two recorded
+unblock paths (riir-reflex `.issues/011`). The fixture copies are
+digest-pinned both sides; this repo stays the source of truth for the
+oracle data and the fit recipe.
