@@ -616,3 +616,61 @@ lanes) and the site's frozen v2 flappy render are the two recorded
 unblock paths (riir-reflex `.issues/011`). The fixture copies are
 digest-pinned both sides; this repo stays the source of truth for the
 oracle data and the fit recipe.
+
+## T11 addendum — owner round-3 Q&A on the arena (2026-09-23, site `91af68d` + sibling `b09bffb`)
+
+The owner watched the recorded demo (laya 580/13 lines vs modelless 40/1)
+and asked five questions. Verdicts, all measured:
+
+1. **Why does modelless score lower?** Not the text input — both lanes read
+   the same sentences. In the recorded demo the modelless board's
+   probabilities are null by construction (`scoreOptions` returns recorded
+   ps to the laya lane only), so every turn is the honest abstain →
+   labelled random fallback; a full-random tetris game scores ~40. The gap
+   is exactly the missing game corpus, and the fitted head closes it —
+   **v0.2.2 now serves it** (T10 above): the modelless board plays at the
+   44/120-class instead of random (10.8%-class).
+2. **Is laya python or our rust?** Our Rust port, always, on this site —
+   G5-parity-verified against the reference checkpoints (top-1 1.000,
+   drift ≤ 3.1e-6); the python/candle lane was deleted 2026-09-22 by owner
+   directive ("no candle at all cost", "No Python anywhere"). The site
+   footnote now states the provenance (site `91af68d`).
+3. **Three recorded lanes incl. "laya python"?** Python board REFUSED: a
+   G5-parity-verified port replays identical decisions (drift ≤ 3e-6) at
+   1.3–1.5× slower — an information-free duplicate that would also violate
+   the no-python directive. The meaningful three-tier arena is
+   **laya-rust (teacher) / latent-first fitted head (µs, plays) / raw
+   modelless (honest abstain baseline)** — the baseline needs an engine
+   lane-override knob (`X-Reflex-Lane: raw`) before it can be shown live
+   beside the head, since the serve path tries the head first.
+4. **Why does a recording have a seed input?** The seed's only demo effect
+   is shuffling the modelless board's random abstain fallback (the recorded
+   walk itself is fixed bytes); live, it seeds the shared piece stream (same
+   seed = same game on both lanes). Fixed site-side: the control relabels
+   to "fallback seed" in demo mode with a title explaining exactly that
+   (site `91af68d`), so a recording never looks seed-driven.
+5. **Can it run in the browser?** Matrix: the recorded demo already runs
+   fully in-browser (that is the no-engine mode); the live laya lane stays
+   native-only (~650 MB weights + Metal/gemm — never a browser target);
+   and the fitted head — grammar tables + decoded features + a linear
+   score, zero allocations — is exactly the artifact that CAN run
+   client-side, so the latent-first lane can ultimately play live in the
+   tab with no engine at all. That is the owner's "latent first" endgame,
+   and it is the same distillation shape as bonsai/gemma freeze/thaw:
+   deterministic construction over recorded teacher outputs, never
+   gradient descent on the teacher.
+
+Roadmap tasks (unchecked):
+
+- [ ] 3-board arena layout (latent-first head vs laya vs explicit raw
+  baseline) — gated on the engine lane-override knob (`X-Reflex-Lane:
+  raw`); file the knob in riir-reflex beside `.issues/011`.
+- [ ] Fresh full-argmax laya recording to replace the mixed-play
+  state-capture walk in the demo (the mixed play is disclosed in the
+  banner; `gen_demo_oracle.mjs` + `arena_demo_check.mjs` are committed for
+  exactly this swap; v0.2.2 is cut, so the engine port is free).
+- [ ] Browser-live head: compile the fitted head to wasm so the
+  latent-first lane plays in-tab with zero engine.
+- [ ] Flappy v3 render + lanes cross-lane context — the two recorded
+  unblock paths (riir-reflex `.issues/011`) so all three games play on the
+  latent-first lane.
