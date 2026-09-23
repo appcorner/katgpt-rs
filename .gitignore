@@ -44,3 +44,6 @@ CLAUDE.md
 # from intent (AGENTS.md §shared worktree), and several sessions write here at
 # once — an untracked nohup.out is a landmine, not a file anyone means to keep.
 nohup.out
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/
