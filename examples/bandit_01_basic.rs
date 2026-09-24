@@ -52,7 +52,7 @@ use katgpt_rs::speculative::ScreeningPruner;
 use katgpt_rs::types::Rng;
 
 const EPISODES: usize = 1000;
-const SEED: u64 = 999;
+const SEED: u64 = 42;
 
 // ── Domain Pruner: Action Masking ──────────────────────────────
 
@@ -319,7 +319,7 @@ fn print_constrained_section() {
 
     // Arm 4 is best (0.9) but blocked by terrain constraint
     let probs = [0.1f32, 0.3, 0.7, 0.4, 0.9];
-    let blocked = vec![4];
+    let blocked = vec![2,4];
 
     println!("🎯 Scenario: 5 arms, Arm 4 blocked (p=0.9, best overall)");
     println!("   Domain pruner returns relevance(4) = 0.0 → never explored");
@@ -374,10 +374,14 @@ fn print_constrained_section() {
 
     println!();
     println!(
-        "  ✅ Best valid arm: {} (true p={:.1}) — arm 4 never explored",
+        "  ✅ Best valid arm: {} (true p={:.1})",
         pruner.best_arm(),
         probs[pruner.best_arm()]
     );
+    // loop print blocked arms are never explored
+    for &arm in &blocked {
+        println!("  🚫 Arm {arm} was blocked and never explored.");
+    }
     println!();
     println!("  ScreeningPruner = action masking for bandits.");
     println!("  Invalid actions get relevance 0.0 → DDTree never explores them.");
