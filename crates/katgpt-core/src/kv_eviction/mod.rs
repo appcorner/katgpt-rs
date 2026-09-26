@@ -183,6 +183,31 @@ impl UsageScoreTable {
         out.clear();
         out.extend(self.rows[..self.len].iter().map(|r| score(r, tick)));
     }
+
+    /// Keep the rows named by `keep` (ascending indices into the live
+    /// prefix), in order, compacting the table in place: row `keep[j]`
+    /// becomes row `j`, and `len` becomes `keep.len()`. The KV-cache
+    /// compaction twin — when the caller gathers retained cache slots to the
+    /// front, the per-slot score rows must gather the same way or the side
+    /// table desynchronizes from the cache it indexes. `queries`-style
+    /// global state does not exist here; `UsageRow.admission_tick` travels
+    /// with its row, so age semantics are preserved exactly.
+    ///
+    /// O(len), zero allocation, in place (the write index never passes the
+    /// read index). `keep` must be ascending with every index `< len`;
+    /// violations are a caller bug (`debug_assert!`). Rows past the new
+    /// `len` hold moved-out data and are only ever read after a
+    /// [`Self::reset_row`] re-admission, which overwrites them.
+    pub fn gather_rows(&mut self, keep: &[usize]) {
+        for (j, &r) in keep.iter().enumerate() {
+            debug_assert!(r < self.len, "gather index {r} out of live prefix");
+            debug_assert!(j == 0 || keep[j - 1] < r, "gather indices must ascend");
+            if r != j {
+                self.rows[j] = self.rows[r];
+            }
+        }
+        self.len = keep.len();
+    }
 }
 
 /// Lowest-`k` eviction selection among unpinned rows, reusing `out`.
@@ -411,6 +436,31 @@ mod tests {
         };
         // Scoring BEFORE admission_tick: saturating_sub -> 0 -> divisor 1.
         assert_eq!(score(&row, 500), 3.0);
+    }
+
+    #[test]
+    fn gather_rows_moves_rows_with_their_ticks() {
+        // Distinct histories; keep rows 1 and 3 and verify each survivor
+        // carries its exact prior (cum_mass, admission_tick) at its NEW
+        // index, so age semantics survive the compaction.
+        let mut t = UsageScoreTable::with_capacity(5);
+        for i in 0..5 {
+            t.reset_row(i, 100 + i as u64);
+        }
+        observe(t.row_mut(1), 0.25, 200);
+        observe(t.row_mut(1), 0.25, 200);
+        observe(t.row_mut(3), 0.5, 200);
+        t.gather_rows(&[1, 3]);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.row(0).cum_mass, 0.5);
+        assert_eq!(t.row(0).admission_tick, 101);
+        assert_eq!(t.row(1).cum_mass, 0.5);
+        assert_eq!(t.row(1).admission_tick, 103);
+        // Scoring after the gather reads the moved rows: age is REAL age
+        // (tick 204 minus the moved admission ticks 101 / 103).
+        let mut out = Vec::new();
+        t.scores(204, &mut out);
+        assert_eq!(out, vec![0.5 / 103.0, 0.5 / 101.0]);
     }
 
     // ── T1.1 table shape ──────────────────────────────────────────────
