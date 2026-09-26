@@ -10,7 +10,7 @@ use crate::transformer::{
     ForwardContext, MultiLayerKVCache, PagedKVCache, RavenKVCache, TransformerWeights, forward,
     forward_paged, forward_raven, raven_readout, raven_update,
 };
-#[cfg(any(feature = "turboquant", feature = "hla_attention"))]
+#[cfg(feature = "turboquant")]
 use crate::types::kv_dim;
 use crate::types::{Config, Rng};
 #[cfg(feature = "turboquant")]

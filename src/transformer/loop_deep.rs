@@ -84,6 +84,9 @@ impl LoopDeepStats {
     }
 
     /// Record one state snapshot, reusing a retired buffer when available.
+    // Callers live only inside `forward_looped` (`lt2_looped`-gated) — ungated
+    // builds otherwise carry two dead `pub(crate)` methods (dead_code).
+    #[cfg(feature = "lt2_looped")]
     pub(crate) fn push_state(&mut self, x: &[f32]) {
         let mut buf = self.spare_states.pop().unwrap_or_default();
         buf.clear();
@@ -92,6 +95,7 @@ impl LoopDeepStats {
     }
 
     /// Record one logit snapshot (row length fixed by the first call).
+    #[cfg(feature = "lt2_looped")]
     pub(crate) fn push_logits(&mut self, logits: &[f32]) {
         self.logit_stride = logits.len();
         self.logit_snapshot_buf.extend_from_slice(logits);
