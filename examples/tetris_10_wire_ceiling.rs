@@ -10,7 +10,7 @@
 //! ordinals. Issue 009 T5 asks whether the wire bounds a richer decoder,
 //! or whether the Instinct lane must receive the raw afterstate grid.
 //!
-//! THE INSTRUMENT. One serving-matched full-feature reference vs four
+//! THE INSTRUMENT. One serving-matched full-feature reference vs six
 //! wire-constrained decoders, all 1-ply, no preview, hold OFF, fresh bag:
 //!
 //! - `champ1ply` — the rulebook champion genome `68cae9d382014662`
@@ -33,14 +33,22 @@
 //!   state sentence, ≤ 1 575 000 cells), hierarchical fallback
 //!   t3 → t2 → t1 → lin. Each table arm falls back down its own chain,
 //!   so every arm is a complete policy.
+//! - `wire-t1d` / `wire-t3d` — the DEMEANED-table class (added 2026-09-27,
+//!   the Issue-825 cross-review's owed decoder): cells bumped with
+//!   `value − decision mean`, targeting within-point ranking directly.
+//!   An absolute cell mean tracks position goodness as much as option
+//!   rank; if ANY wire decoder carries the champion's ranking, these
+//!   are the ones. Chains t1d → lin and t3d → t1d → lin.
 //!
-//! A THEOREM, not a measurement: within one decision point the state
-//! sentence and the piece are CONSTANT across options, so no decoder can
-//! change its within-point ranking through them — except by estimating
-//! each option's cell MEAN better (conditioning re-weights which training
-//! states contribute to a cell). t2/t3 measure exactly that residual.
-//! The piece is NOT in the spot tuple, so t2 is the first level where the
-//! wire's own state clause can matter at all.
+//! A THEOREM, but a NARROW one (scoped 2026-09-27, the Issue-825 cross-review):
+//! within one decision point the state sentence and the piece are CONSTANT
+//! across options, so no decoder that adds a state term to an ADDITIVE
+//! option term can change its within-point ranking through them. It does
+//! NOT bind decoders that combine the two (a keyed table t2/t3 does),
+//! which is exactly what t2/t3 measure. And a cell-mean of ABSOLUTE values
+//! tracks position goodness as much as option rank — the DEMEANED arms
+//! (t1d/t3d, bumped with value − decision mean) are the table class that
+//! targets within-point ranking directly.
 //!
 //! Protocol: train on champ1ply-driven games (the teacher's own state
 //! distribution — the T7 distill flow), seeds 1..=40, regimes empty /
@@ -398,9 +406,24 @@ enum WireArm {
     T1,
     T2,
     T3,
+    /// Demeaned-target t1: cells bumped with `value − decision mean` — the
+    /// table class that targets within-point ranking directly (an absolute
+    /// cell mean tracks position goodness as much as option rank). Chain
+    /// t1d → lin; the rare lin fallback (t1 is dense) mixes scales for that
+    /// option only — disclosed via the level-usage line.
+    T1D,
+    /// Demeaned-target t3: chain t3d → t1d → lin.
+    T3D,
 }
 
-const WIRE_ARMS: [WireArm; 4] = [WireArm::Lin, WireArm::T1, WireArm::T2, WireArm::T3];
+const WIRE_ARMS: [WireArm; 6] = [
+    WireArm::Lin,
+    WireArm::T1,
+    WireArm::T2,
+    WireArm::T3,
+    WireArm::T1D,
+    WireArm::T3D,
+];
 
 impl WireArm {
     fn name(self) -> &'static str {
@@ -409,16 +432,26 @@ impl WireArm {
             WireArm::T1 => "wire-t1",
             WireArm::T2 => "wire-t2",
             WireArm::T3 => "wire-t3",
+            WireArm::T1D => "wire-t1d",
+            WireArm::T3D => "wire-t3d",
         }
     }
-    /// The highest table level the arm may consult (Lin = 0).
+    /// The highest table level the arm may consult (Lin = 0). The demeaned
+    /// arms reuse levels 1/3; `demeaned` says which table family to read.
     fn max_level(self) -> u8 {
         match self {
             WireArm::Lin => 0,
-            WireArm::T1 => 1,
+            WireArm::T1 | WireArm::T1D => 1,
             WireArm::T2 => 2,
-            WireArm::T3 => 3,
+            WireArm::T3 | WireArm::T3D => 3,
         }
+    }
+    fn demeaned(self) -> bool {
+        matches!(self, WireArm::T1D | WireArm::T3D)
+    }
+    /// Index into the rank/level arrays (the WIRE_ARMS order).
+    fn idx(self) -> usize {
+        WIRE_ARMS.iter().position(|&w| w == self).expect("arm in WIRE_ARMS")
     }
 }
 
@@ -428,12 +461,16 @@ struct Cell {
     n: u32,
 }
 
-/// All four decoders share one trained state; each arm reads its own
+/// All six decoders share one trained state; each arm reads its own
 /// chain down to the linear model. Immutable after training (Sync).
+/// `t1d`/`t3d` carry the DEMEANED targets (value − decision mean); the
+/// absolute tables are untouched, so the original arms reproduce exactly.
 struct Decoder {
     t1: HashMap<u16, Cell>,
     t2: HashMap<u16, Cell>,
     t3: HashMap<u32, Cell>,
+    t1d: HashMap<u16, Cell>,
+    t3d: HashMap<u32, Cell>,
     lin: Linear,
 }
 
@@ -461,10 +498,23 @@ impl Decoder {
     }
 
     /// The arm's chain: highest table with support ≥ min, else down,
-    /// else the linear model. Returns (value, level used 0..=3).
+    /// else the linear model. Returns (value, level used 0..=3). Demeaned
+    /// arms read the demeaned family and skip level 2 (no t2d — the piece
+    /// clause is absorbed by t3d's state key).
     fn predict(&self, arm: WireArm, t: &[u8; 5], sk: StateKey) -> (f64, u8) {
         let t1k = pack_t1(t);
         let lvl = arm.max_level();
+        if arm.demeaned() {
+            if lvl >= 3
+                && let Some(v) = Self::table_mean3(&self.t3d, t3_key(t1k, sk), TABLE_MIN)
+            {
+                return (v, 3);
+            }
+            if let Some(v) = Self::table_mean(&self.t1d, t1k, TABLE_MIN) {
+                return (v, 1);
+            }
+            return (self.lin.predict(t), 0);
+        }
         if lvl >= 3
             && let Some(v) = Self::table_mean3(&self.t3, t3_key(t1k, sk), TABLE_MIN)
         {
@@ -514,15 +564,15 @@ struct Outcome {
 #[derive(Clone, Copy, Default)]
 struct RankPartial {
     n: u64,
-    agree: [u64; 4],
-    rank_sum: [u64; 4],
-    top3: [u64; 4],
+    agree: [u64; WIRE_ARMS.len()],
+    rank_sum: [u64; WIRE_ARMS.len()],
+    top3: [u64; WIRE_ARMS.len()],
 }
 
 impl RankPartial {
     fn merge(&mut self, o: &RankPartial) {
         self.n += o.n;
-        for i in 0..4 {
+        for i in 0..WIRE_ARMS.len() {
             self.agree[i] += o.agree[i];
             self.rank_sum[i] += o.rank_sum[i];
             self.top3[i] += o.top3[i];
@@ -638,6 +688,8 @@ fn train(g1: &Genome, seeds: &[u64], cap: usize) -> TrainOut {
     let mut t1: HashMap<u16, Cell> = HashMap::new();
     let mut t2: HashMap<u16, Cell> = HashMap::new();
     let mut t3: HashMap<u32, Cell> = HashMap::new();
+    let mut t1d: HashMap<u16, Cell> = HashMap::new();
+    let mut t3d: HashMap<u32, Cell> = HashMap::new();
     let mut games: Vec<GameRows> = Vec::new();
     let mut rows = 0u64;
     let mut states = 0u64;
@@ -666,6 +718,11 @@ fn train(g1: &Genome, seeds: &[u64], cap: usize) -> TrainOut {
                 let scored = decide_scored(g1, &view);
                 debug_assert_eq!(scored.len(), opts.len());
                 let sk = state_key(&board, cur);
+                // The demeaned tables' target: value − decision mean. The
+                // per-decision constant is identical across the decision's
+                // options, so argmax over demeaned predictions equals
+                // argmax over their re-centered values.
+                let dmean = scored.iter().map(|(_, v)| *v).sum::<f64>() / scored.len() as f64;
                 for (p, (_, v)) in opts.iter().zip(&scored) {
                     let feat = outcome_features(&board, p);
                     let t = grammar_tables::tetris_spot_forward(&board, p, &feat);
@@ -673,6 +730,8 @@ fn train(g1: &Genome, seeds: &[u64], cap: usize) -> TrainOut {
                     Decoder::bump(&mut t1, t1k, *v);
                     Decoder::bump(&mut t2, t2_key(t1k, sk), *v);
                     Decoder::bump3(&mut t3, t3_key(t1k, sk), *v);
+                    Decoder::bump(&mut t1d, t1k, v - dmean);
+                    Decoder::bump3(&mut t3d, t3_key(t1k, sk), v - dmean);
                     st.row(&t, *v);
                     rows += 1;
                 }
@@ -691,7 +750,7 @@ fn train(g1: &Genome, seeds: &[u64], cap: usize) -> TrainOut {
     let (occ1, occ2) = (occ(&t1), occ(&t2));
     let occ3 = t3.values().filter(|c| c.n >= TABLE_MIN).count();
     TrainOut {
-        dec: Decoder { t1, t2, t3, lin },
+        dec: Decoder { t1, t2, t3, t1d, t3d, lin },
         lam,
         loo,
         rows,
@@ -993,12 +1052,28 @@ type GameResult = (Option<WireArm>, usize, u64, Outcome, Option<RankPartial>);
         println!("{:<11} {:.3} / {:.3} / {:.3} / {:.3}", w.name(), mix[0], mix[1], mix[2], mix[3]);
     }
 
-    // The pre-declared verdict, judged on wire-t3.
-    let agree3 = if rank.n > 0 {
-        rank.agree[3] as f64 / rank.n as f64
-    } else {
-        0.0
+    // The pre-declared verdict (t3 — the maximal ADDITIVE-class decoder of
+    // the original run), plus the post-hoc demeaned-class line the
+    // Issue-825 cross-review owed (a cell mean of ABSOLUTE values tracks
+    // position goodness as much as option rank; the demeaned tables target
+    // within-point ranking directly). The binding verdict is the BEST wire
+    // arm across both classes — if any wire-constrained decoder clears the
+    // gates, the wire carries a champion-level ranking.
+    let agree_of = |w: WireArm| {
+        if rank.n > 0 {
+            rank.agree[w.idx()] as f64 / rank.n as f64
+        } else {
+            0.0
+        }
     };
+    let agree3 = agree_of(WireArm::T3);
+    let best_arm = WIRE_ARMS
+        .iter()
+        .copied()
+        .filter(|w| *w != WireArm::Lin)
+        .max_by(|a, b| agree_of(*a).total_cmp(&agree_of(*b)))
+        .expect("wire arms non-empty");
+    let agree_best = agree_of(best_arm);
     let (champ_pts, champ_lines, _, _) = overall[&None];
     let (t3_pts, t3_lines, _, _) = overall[&Some(WireArm::T3)];
     let sp3 = sig_p[&WireArm::T3];
@@ -1008,12 +1083,28 @@ type GameResult = (Option<WireArm>, usize, u64, Outcome, Option<RankPartial>);
     println!(
         "agreement {agree3:.4} | sign_p(pts) {sp3:.4} | pts ratio {pts_ratio:.3} | lines ratio {lines_ratio:.3}"
     );
-    if agree3 >= 0.95 && sp3 >= 0.05 && lines_ratio >= 0.95 {
-        println!("VERDICT: WIRE-SUFFICIENT — the five ordinals carry the champion's 1-ply ranking; a richer DECODER suffices, no wire widening.");
-    } else if agree3 <= 0.85 || (sp3 < 0.05 && pts_ratio <= 0.80) {
-        println!("VERDICT: WIRE-MUST-WIDEN — the five ordinals destroy champion-level ranking; the Instinct lane needs the raw afterstate grid (or its classes).");
+    let sp_best = sig_p[&best_arm];
+    let (best_pts, best_lines, _, _) = overall[&Some(best_arm)];
+    let best_pts_ratio = best_pts / champ_pts;
+    let best_lines_ratio = best_lines / champ_lines;
+    println!(
+        "best wire arm: {} agreement {agree_best:.4} | sign_p {sp_best:.4} | pts ratio {best_pts_ratio:.3} | lines ratio {best_lines_ratio:.3}",
+        best_arm.name()
+    );
+    let (v3, vbest) = (
+        agree3 >= 0.95 && sp3 >= 0.05 && lines_ratio >= 0.95,
+        agree_best >= 0.95 && sp_best >= 0.05 && best_lines_ratio >= 0.95,
+    );
+    let (must3, mustbest) = (
+        agree3 <= 0.85 || (sp3 < 0.05 && pts_ratio <= 0.80),
+        agree_best <= 0.85 || (sp_best < 0.05 && best_pts_ratio <= 0.80),
+    );
+    if v3 && vbest {
+        println!("VERDICT: WIRE-SUFFICIENT — the five ordinals carry the champion's 1-ply ranking under both decoder classes; no wire widening.");
+    } else if must3 && mustbest {
+        println!("VERDICT: WIRE-MUST-WIDEN — no wire-constrained decoder class carries champion-level ranking (absolute-cell-mean AND demeaned tables both fail); the Instinct lane needs the raw afterstate grid (or its classes).");
     } else {
-        println!("VERDICT: MIXED — adjudicate on the board outcomes before any wire redesign.");
+        println!("VERDICT: MIXED — the two decoder classes disagree; adjudicate on the board outcomes before any wire redesign.");
     }
 
     println!(
