@@ -24,6 +24,10 @@ AI มีหลายทางเลือก
 | Lab 2 | [`bandit_01_basic.rs`](bandit_01_basic.rs) | `cargo run --example bandit_01_basic` | Constraint / Pruner; ต้นแบบจาก example เดียวกับ Lab 1 |
 | Lab 3 | [`lab3_context_baseline.rs`](lab3_context_baseline.rs) | `cargo run --example lab3_context_baseline` | Context-aware bandit baseline |
 | Lab 4 | [`lab4_generalization.rs`](lab4_generalization.rs) | `cargo run --example lab4_generalization` | Generalization ไปยัง context ที่ไม่เคยเห็น |
+| Lab 5A | [`lab5_uncertainty.rs`](lab5_uncertainty.rs) | `cargo run --example lab5_uncertainty` | Decision margin และ ABSTAIN เมื่อคะแนนอันดับต้นใกล้กัน |
+| Lab 5B | [`lab5b_calibration.rs`](lab5b_calibration.rs) | `cargo run --example lab5b_calibration` | วัด calibration ของ naive confidence ที่สร้างจาก decision margin |
+| Lab 5C | [`lab5c_calibrated_confidence.rs`](lab5c_calibrated_confidence.rs) | `cargo run --example lab5c_calibrated_confidence` | เรียนรู้ histogram calibration แล้วประเมิน mapping บน test set อิสระ |
+| Lab 5D | [`lab5d_calibrated_abstention.rs`](lab5d_calibrated_abstention.rs) | `cargo run --example lab5d_calibrated_abstention` | เปรียบเทียบ margin-based กับ calibrated-confidence abstention |
 
 Labs ปัจจุบัน:
 
@@ -1189,19 +1193,251 @@ Lab 4B+ แสดงว่า model สามารถจับ pattern ได�
 
 ---
 
-# Next Lab
+# Lab 5 — Confidence, Calibration and Abstention
 
-## Lab 5 — Uncertainty, Confidence, Calibration and Abstention
+Lab 1–4 พาเรามาถึงจุดที่ระบบสามารถ:
 
-คำถามหลัก:
+```text
+ดูสถานการณ์
+    ↓
+ประเมิน Action ต่าง ๆ
+    ↓
+เลือก Action ที่น่าจะดีที่สุด
+```
 
-> ระบบรู้ได้อย่างไรว่าควรเชื่อ prediction ของตัวเองแค่ไหน?
+แต่ยังมีคำถามสำคัญที่เหลืออยู่:
 
-และ:
+> ถ้า Model เลือก Action หนึ่งขึ้นมา เราควรเชื่อการตัดสินใจนั้นมากแค่ไหน?
 
-> เมื่อไม่มั่นใจ ควรเลือกเอง หรือส่งต่อให้ระบบที่คิดละเอียดกว่า / Human?
+และคำถามที่สำคัญยิ่งกว่า:
 
-แนวทางจะต่อจาก failure ที่พบใน Lab 4B+:
+> ถ้า Model ไม่แน่ใจ ควรปล่อยให้มันทำงานเองหรือไม่?
+
+Lab 5 จึงศึกษาสี่เรื่องต่อเนื่องกัน:
+
+| Lab | Topic | คำถามหลัก |
+|---|---|---|
+| 5A | Decision Margin + Abstention | Action ที่ชนะ ชนะขาดแค่ไหน? |
+| 5B | Measuring Calibration | ตัวเลข Confidence ที่เราสร้างขึ้น เชื่อเป็น % ได้จริงไหม? |
+| 5C | Calibration Mapping | จะเรียนรู้ความหมายของ Confidence จากผลจริงได้อย่างไร? |
+| 5D | Calibrated Abstention | จะใช้ Confidence ที่ calibrate แล้วควบคุมว่า AI ควรทำเองหรือหยุดเมื่อไร? |
+
+---
+
+# 5.0 คำศัพท์ที่ควรรู้ก่อน
+
+Lab 5 มีศัพท์ใหม่หลายคำ แต่จริง ๆ แล้วแต่ละคำตอบคำถามคนละเรื่อง
+
+## Predicted Score / Predicted Reward
+
+ค่าที่ Model ประเมินให้แต่ละ Action
+
+ตัวอย่าง:
+
+```text
+LLM = 0.588
+RAG = 0.564
+SQL = 0.538
+```
+
+แปลแบบง่าย:
+
+> Model คิดว่า LLM ดูดีที่สุดในสถานการณ์นี้
+
+แต่ `0.588` ยังไม่ได้หมายความว่า:
+
+> LLM มีโอกาสถูก 58.8%
+
+มันเป็นเพียงคะแนนที่ Model ใช้เปรียบเทียบ Actions
+
+---
+
+## Decision Margin
+
+ความต่างระหว่าง Action อันดับหนึ่งกับอันดับสอง
+
+ตัวอย่าง:
+
+```text
+LLM = 0.588
+RAG = 0.564
+
+Margin = 0.588 - 0.564
+       = 0.024
+```
+
+แปลแบบง่าย:
+
+> LLM ชนะ RAG นิดเดียว
+
+ถ้า:
+
+```text
+LLM = 0.871
+RAG = 0.595
+
+Margin = 0.276
+```
+
+แปลว่า:
+
+> LLM ชนะขาดกว่ามาก
+
+ดังนั้น Margin ใช้เป็นสัญญาณง่าย ๆ ว่า Decision นั้น “สูสี” หรือ “ชัดเจน”
+
+แต่:
+
+```text
+Margin ≠ Probability
+```
+
+`Margin = 0.20` ไม่ได้แปลว่า “มั่นใจ 20%”
+
+---
+
+## Confidence
+
+ในความหมายทั่วไปคือ:
+
+> ระบบคิดว่าการตัดสินใจของตัวเองน่าเชื่อถือแค่ไหน
+
+แต่คำว่า Confidence ต้องใช้ระวังมาก
+
+ถ้าเราเอา Margin มาคูณเลขบางตัวแล้วได้:
+
+```text
+0.72
+```
+
+ไม่ได้แปลว่าเรามี “72% Confidence” ที่มีความหมายทางสถิติทันที
+
+---
+
+## Calibration
+
+Calibration แปลแบบง่าย ๆ ว่า:
+
+> ตรวจว่าตัวเลข Confidence ที่ระบบพูดออกมา สอดคล้องกับความถูกต้องจริงหรือไม่
+
+ตัวอย่าง:
+
+ถ้าระบบพูดว่า:
+
+```text
+Confidence ≈ 80%
+```
+
+จำนวน 1,000 ครั้ง
+
+ถ้า calibrated ดี เราอยากเห็นว่าระบบถูกประมาณ:
+
+```text
+~800 ครั้ง
+```
+
+ถ้ามันพูดว่า 80% แต่ถูกแค่ 50%:
+
+```text
+Overconfident
+```
+
+แปลว่า:
+
+> มั่นใจเกินจริง
+
+ถ้าพูดว่า 40% แต่จริง ๆ ถูก 80%:
+
+```text
+Underconfident
+```
+
+แปลว่า:
+
+> มั่นใจต่ำกว่าความสามารถจริง
+
+---
+
+## Abstain
+
+`ABSTAIN` หมายถึง:
+
+> ระบบมี Prediction แต่เลือกที่จะไม่ลงมือทำเอง
+
+ไม่ใช่ Error
+
+ไม่ใช่ Failure
+
+แต่เป็น Decision หนึ่งว่า:
+
+```text
+"ข้อมูลยังไม่พอให้ฉันทำเอง"
+```
+
+ในระบบจริง ABSTAIN อาจหมายถึง:
+
+```text
+ส่งต่อให้ LLM ที่เก่งกว่า
+ใช้ RAG/Search เพิ่ม
+เรียก Tool เพิ่ม
+ถาม Human
+หรือเข้าสู่ System 2
+```
+
+---
+
+## Coverage
+
+Coverage คือ:
+
+> ระบบยอมทำงานเองกี่เปอร์เซ็นต์
+
+เช่น:
+
+```text
+100 งาน
+AI ทำเอง 70 งาน
+ส่งต่อ 30 งาน
+
+Coverage = 70%
+```
+
+---
+
+## Selective Accuracy
+
+Selective Accuracy คือ:
+
+> เฉพาะงานที่ AI ยอมทำเอง มันทำถูกกี่เปอร์เซ็นต์
+
+ตัวอย่าง:
+
+```text
+AI ทำเอง 70 งาน
+ถูก 69 งาน
+
+Selective Accuracy = 98.6%
+```
+
+ดังนั้น Coverage และ Selective Accuracy ต้องดูคู่กัน
+
+เพราะ:
+
+```text
+ทำเอง 1 งาน
+ถูก 1 งาน
+```
+
+ก็ได้ Accuracy 100%
+
+แต่แทบไม่มี Productivity
+
+---
+
+# Lab 5A — Decision Margin and Abstention
+
+## ปัญหา
+
+จาก Lab 4 เราพบสถานการณ์:
 
 ```text
 Context = 0.40
@@ -1210,32 +1446,1096 @@ Predicted:
 LLM = 0.588
 RAG = 0.564
 SQL = 0.538
+```
 
-Model chooses:
+Model เลือก:
+
+```text
 LLM
+```
 
-But true best:
+แต่ค่าจริงคือ:
+
+```text
+LLM = 0.54
+RAG = 0.60
+SQL = 0.62
+```
+
+ดังนั้น True Best คือ:
+
+```text
 SQL
 ```
 
-Lab 5 จะเริ่มศึกษาความแตกต่างระหว่าง:
+Model เลือกผิด
+
+แต่ถ้ามองเพิ่ม:
 
 ```text
-Prediction
-Confidence
-Calibration
-Abstain
+LLM = 0.588
+RAG = 0.564
+
+Margin = 0.024
 ```
 
-เพื่อพัฒนาจาก:
+จะเห็นว่าอันดับหนึ่งกับอันดับสองสูสีกันมาก
+
+จึงเกิดแนวคิด:
 
 ```text
-"เลือก Action ที่คะแนนสูงสุด"
+ถ้า Margin สูง
+→ EXECUTE
+
+ถ้า Margin ต่ำ
+→ ABSTAIN
+```
+
+---
+
+## Experiment
+
+กำหนด:
+
+```text
+ABSTAIN_THRESHOLD = 0.10
+```
+
+Policy:
+
+```text
+margin >= 0.10
+    → EXECUTE
+
+margin < 0.10
+    → ABSTAIN
+```
+
+---
+
+## Result
+
+ก่อน Abstention:
+
+```text
+Raw accuracy = 8/9 = 88.9%
+```
+
+หลังใช้ Threshold 0.10:
+
+```text
+EXECUTE = 6
+ABSTAIN = 3
+
+Correct EXECUTE = 6
+Wrong EXECUTE = 0
+
+Coverage = 66.7%
+Selective Accuracy = 100%
+```
+
+สำคัญที่สุดคือ Wrong Prediction ที่ Context `0.40` ถูกจับไว้ในกลุ่ม:
+
+```text
+ABSTAIN
+```
+
+---
+
+## Threshold Sweep
+
+ผลจาก Threshold หลายค่า:
+
+| Threshold | Coverage | Selective Accuracy |
+|---:|---:|---:|
+| 0.00 | 100% | 88.9% |
+| 0.02 | 100% | 88.9% |
+| 0.05 | 88.9% | 100% |
+| 0.10 | 66.7% | 100% |
+| 0.15 | 55.6% | 100% |
+| 0.20 | 55.6% | 100% |
+| 0.30 | 11.1% | 100% |
+
+เห็น Trade-off ชัดเจน:
+
+```text
+Threshold ต่ำ
+    ↓
+AI ทำงานเองเยอะ
+    ↓
+Coverage สูง
+    ↓
+อาจปล่อย Wrong Decision มากขึ้น
+
+
+Threshold สูง
+    ↓
+AI ระมัดระวังมากขึ้น
+    ↓
+Coverage ลดลง
+    ↓
+ส่งต่อมากขึ้น
+```
+
+---
+
+## บทเรียนจาก Lab 5A
+
+```text
+Margin = สัญญาณว่า
+"อันดับหนึ่งชนะอันดับสองขาดแค่ไหน"
+```
+
+Margin มีประโยชน์ในการสร้าง Abstention Policy
+
+แต่:
+
+```text
+Margin ≠ Confidence Probability
+```
+
+ดังนั้นยังไม่ควรพูดว่า:
+
+```text
+margin = 0.20
+→ Confidence = 20%
+```
+
+---
+
+# Lab 5B — Measuring Calibration
+
+## ปัญหา
+
+เราต้องการรู้ว่า:
+
+> ถ้าเราแปลง Margin ให้กลายเป็นตัวเลข 0–1 แล้วเรียกว่า Confidence เราเชื่อเลขนั้นได้หรือไม่?
+
+เพื่อทดลอง เราจงใจสร้าง:
+
+```text
+naive_confidence
+    = clamp(margin × 4.0, 0, 1)
+```
+
+เลข `4.0` เป็นค่าที่กำหนดขึ้นเอง
+
+ไม่ได้เรียนจากข้อมูล
+
+ไม่ได้มีความหมายทาง Probability
+
+---
+
+## Evaluation
+
+ใช้:
+
+```text
+10,000 decisions
+```
+
+และเปรียบเทียบ:
+
+```text
+Naive Confidence
+       vs
+Decision ถูกจริงหรือไม่
+```
+
+จัด Confidence เป็นช่วง เช่น:
+
+```text
+0–10%
+10–20%
+20–30%
+...
+90–100%
+```
+
+แล้วดูว่าแต่ละกลุ่มถูกจริงกี่ %
+
+---
+
+## Result
+
+ตัวอย่าง:
+
+```text
+Mean Confidence ≈ 5.7%
+Actual Accuracy ≈ 38.4%
+```
+
+อีกกลุ่ม:
+
+```text
+Mean Confidence ≈ 35%
+Actual Accuracy = 100%
+```
+
+เห็นชัดว่า:
+
+```text
+Naive Confidence
+≠
+Actual Probability of Correctness
+```
+
+---
+
+## Overall Result
+
+```text
+Mean naive confidence = 0.593
+Actual accuracy       = 0.858
+ECE                   = 0.265
+```
+
+ระบบจึงมีลักษณะ:
+
+```text
+Underconfident
+```
+
+คือ:
+
+> ตัวเลข Confidence ต่ำกว่าความถูกต้องจริงโดยรวม
+
+---
+
+## ECE คืออะไร?
+
+`ECE` = Expected Calibration Error
+
+ใช้สรุปว่า:
+
+> ตัวเลข Confidence ที่รายงาน ห่างจาก Accuracy จริงมากแค่ไหน
+
+คิดง่าย ๆ:
+
+```text
+Reported Confidence
+         vs
+Actual Accuracy
+         ↓
+ดูความต่างแต่ละกลุ่ม
+         ↓
+รวมออกมาเป็น ECE
+```
+
+โดยทั่วไป:
+
+```text
+ECE ต่ำลง
+→ Calibration ดีขึ้น
+```
+
+แต่:
+
+```text
+ECE ต่ำ
+≠
+ระบบปลอดภัย
+≠
+Decision ถูกเสมอ
+```
+
+---
+
+## Boundary Analysis
+
+พบว่า Model มีปัญหามากบริเวณ:
+
+```text
+knowledge_score ≈ 0.40–0.60
+```
+
+ผล:
+
+```text
+Context Range    Accuracy
+
+0.00–0.20        100%
+0.20–0.40         79.9%
+0.40–0.60         50.5%
+0.60–0.80        100%
+0.80–1.00        100%
+```
+
+ตรงกลางคือบริเวณที่ Actions แข่งขันกันมาก
+
+---
+
+## บทเรียนจาก Lab 5B
+
+```text
+Predicted Reward
+    ≠
+Decision Margin
+    ≠
+Probability Decision Is Correct
+```
+
+และ:
+
+```text
+ค่าที่อยู่ระหว่าง 0–1
+ไม่ได้แปลว่า
+เป็น Probability
+```
+
+หรือสั้น ๆ:
+
+```text
+bounded ≠ calibrated
+```
+
+---
+
+# Lab 5C — Learning a Calibration Mapping
+
+## ปัญหา
+
+จาก Lab 5B เราพบว่า Naive Confidence ไม่ตรงกับ Accuracy จริง
+
+คำถามต่อไปคือ:
+
+> เราสามารถเรียนรู้ Mapping จาก Confidence เดิม ไปเป็น Probability ที่มีความหมายขึ้นได้ไหม?
+
+---
+
+## Data Separation
+
+เพิ่มแนวคิดสำคัญมาก:
+
+```text
+Training Set
+Calibration Set
+Test Set
+```
+
+สามชุดมีหน้าที่ต่างกัน
+
+### Training Set
+
+ใช้ฝึก Decision Model
+
+### Calibration Set
+
+ใช้เรียนว่า:
+
+```text
+signal แบบนี้
+→ ในอดีตถูกกี่ %
+```
+
+### Test Set
+
+ใช้ตรวจสอบ Calibrator หลังจาก Freeze แล้ว
+
+ห้ามใช้ Test Set กลับไปปรับ Calibrator
+
+เพราะจะเท่ากับ:
+
+> แอบดูข้อสอบก่อนสอบจริง
+
+---
+
+## Histogram Calibration
+
+วิธีที่ใช้ใน Lab นี้ง่ายมาก
+
+แบ่ง Naive Confidence เป็นช่วง:
+
+```text
+0.0–0.1
+0.1–0.2
+...
+0.9–1.0
+```
+
+แล้วดูจาก Calibration Dataset ว่า:
+
+```text
+ในช่วงนี้
+Decision ถูกจริงกี่ %
+```
+
+ตัวอย่าง:
+
+```text
+Naive confidence 0.0–0.1
+Actual correctness ≈ 42.5%
+
+ดังนั้น
+Calibrated confidence ≈ 0.425
+```
+
+---
+
+## Learned Mapping
+
+ตัวอย่าง:
+
+```text
+Naive 0.0–0.1 → Calibrated ≈ 0.425
+Naive 0.1–0.2 → Calibrated ≈ 0.370
+Naive 0.2–0.3 → Calibrated ≈ 0.430
+
+Naive >= 0.3
+→ Calibrated ≈ 1.0
+```
+
+จากนั้น Freeze Mapping นี้
+
+---
+
+## Independent Test Result
+
+ก่อน Calibration:
+
+```text
+Decision accuracy       = 0.8623
+Mean confidence         = 0.6020
+ECE                     = 0.2603
+Maximum calibration gap = 0.6502
+```
+
+หลัง Calibration:
+
+```text
+Decision accuracy       = 0.8623
+Mean confidence         = 0.8641
+ECE                     = 0.0040
+Maximum calibration gap = 0.0200
+```
+
+สิ่งสำคัญที่สุด:
+
+```text
+Decision Accuracy
+Before = After
+```
+
+เพราะ Calibration ไม่ได้เปลี่ยน Action ที่ Model เลือก
+
+มันเปลี่ยนเพียง:
+
+> เราควรตีความความน่าเชื่อถือของ Decision นั้นอย่างไร
+
+---
+
+## Mental Model
+
+```text
+Decision Model
+"เลือกอะไร?"
+      ↓
+
+Confidence Signal
+"Decision นี้ดูชัดแค่ไหน?"
+      ↓
+
+Calibrator
+"จากประสบการณ์จริง
+signal แบบนี้ถูกบ่อยแค่ไหน?"
+      ↓
+
+Calibrated Probability
+```
+
+---
+
+## Global vs Local Calibration
+
+แม้ Overall ECE ดีมาก:
+
+```text
+0.004
+```
+
+แต่เมื่อแยก Context:
+
+```text
+Context       Calibration Gap
+
+0.00–0.20        0.000
+0.20–0.40        0.187
+0.40–0.60        0.186
+0.60–0.80        0.000
+0.80–1.00        0.000
+```
+
+ตรงกลางยังไม่ดีนัก
+
+ดังนั้น:
+
+```text
+Global Calibration ดี
+≠
+Local Calibration ดีทุกพื้นที่
+```
+
+---
+
+## ข้อจำกัดของ Histogram Calibration
+
+Histogram ทำให้ Confidence เหลือเพียงไม่กี่ระดับ
+
+เช่น:
+
+```text
+~0.37
+~0.42
+~0.43
+1.00
+```
+
+จึงเข้าใจง่าย แต่หยาบ
+
+เหมาะกับการเรียน Concept
+
+ยังไม่ใช่วิธีที่ควรสรุปว่าเหมาะที่สุดสำหรับ Production
+
+---
+
+# Lab 5D — Calibrated Confidence + Abstention
+
+## เป้าหมาย
+
+เอาสิ่งที่เรียนจาก:
+
+```text
+Lab 5A → Abstention
+
+Lab 5C → Calibrated Probability
+```
+
+มารวมกัน
+
+เราจึงมี Policy สองแบบ
+
+---
+
+## Policy A — Margin-based
+
+```text
+margin >= threshold
+→ EXECUTE
+```
+
+ถามว่า:
+
+> Action ที่ชนะ ชนะขาดเพียงพอหรือไม่?
+
+---
+
+## Policy B — Calibrated-confidence
+
+```text
+calibrated_confidence >= threshold
+→ EXECUTE
+```
+
+ถามว่า:
+
+> จากประสบการณ์ที่ผ่านมา Decision ที่มี signal แบบนี้ถูกบ่อยพอหรือไม่?
+
+---
+
+# Baseline
+
+ถ้าทำทุก Decision:
+
+```text
+Total decisions = 20,000
+
+Correct = 17,220
+Wrong   = 2,780
+
+Accuracy = 86.10%
+Coverage = 100%
+```
+
+---
+
+# Margin Policy Result
+
+ตัวอย่าง:
+
+```text
+margin >= 0.10
+```
+
+ได้:
+
+```text
+Coverage = 68.36%
+Correct Execute = 13,673
+Wrong Execute = 0
+Selective Accuracy = 100%
+```
+
+ตัวเลข `Wrong Execute = 0` หมายถึงไม่พบการตัดสินใจผิดในรายการที่ระบบเลือกทำ
+ในการทดสอบชุดนี้เท่านั้น ไม่ได้แปลว่าความเสี่ยงจริงเป็นศูนย์หรือรับประกันว่า
+การตัดสินใจครั้งต่อไปจะถูกต้องค่ะ
+
+---
+
+# Calibrated Policy Result
+
+ถ้า:
+
+```text
+calibrated confidence >= 0.50
+```
+
+ได้:
+
+```text
+Coverage = 76.62%
+Correct Execute = 15,325
+Wrong Execute = 0
+Selective Accuracy = 100%
+```
+
+เช่นเดียวกัน `Wrong Execute = 0` คือไม่พบการตัดสินใจผิดในรายการที่เลือกทำ
+15,325 รายการของชุดทดสอบนี้ ไม่ใช่หลักประกันว่าความเสี่ยงในอนาคตเป็นศูนย์ค่ะ
+
+ผลนี้เปรียบเทียบ Coverage 76.62% กับ 68.36% จึงไม่ได้ทดสอบที่ Coverage
+เท่ากันค่ะ ในตัวอย่างมีส่วน `Similar-Coverage Comparison` สำหรับดูคู่ threshold
+ที่มี Coverage ใกล้เคียงกัน ซึ่งช่วยให้เทียบสองนโยบายได้เป็นธรรมขึ้น
+
+ใน Synthetic Experiment นี้ Calibrated Policy ทำ Coverage ได้มากกว่า Margin
+Threshold ที่ให้ Wrong Execute = 0 แต่ผลนี้เป็นเพียงผลจากชุดทดลองนี้:
+
+```text
+ไม่ได้พิสูจน์ว่า
+Calibrated Policy ดีกว่าเสมอ
+```
+
+---
+
+# Risk–Coverage Trade-off
+
+## No Abstention
+
+```text
+Coverage = 100%
+Risk     = 13.90%
+```
+
+## Margin 0.10
+
+```text
+Coverage = 68.36%
+Risk     = 0%
+```
+
+## Calibrated >= 0.50
+
+```text
+Coverage = 76.62%
+Risk     = 0%
+```
+
+ใน Lab นี้เราเห็นแนวคิด:
+
+```text
+Autonomy สูง
+     ↕
+Reliability สูง
+```
+
+มักต้อง Trade-off กัน
+
+---
+
+# Context Region Analysis
+
+เมื่อใช้:
+
+```text
+Calibrated Confidence >= 0.90
+```
+
+ได้:
+
+```text
+Context       Coverage
+
+0.00–0.20       100%
+0.20–0.40        34%
+0.40–0.60        50%
+0.60–0.80       100%
+0.80–1.00       100%
+```
+
+ระบบจึง Abstain มากขึ้นบริเวณที่ Decision ยาก
+
+และกล้าทำเองเต็มที่บริเวณที่ Action หนึ่งชัดเจนมาก
+
+---
+
+# ข้อจำกัดที่ค้นพบ
+
+เพราะ Histogram Calibration หยาบ:
+
+```text
+threshold .50
+threshold .60
+threshold .70
+threshold .80
+threshold .90
+threshold .95
+threshold .99
+```
+
+ให้ Coverage เท่ากัน:
+
+```text
+76.62%
+```
+
+เพราะ Confidence ที่ Calibration สร้างขึ้นมีเพียงไม่กี่ระดับ
+
+ดังนั้น Threshold หลายค่าไปตกอยู่ใน Policy เดียวกัน
+
+นี่ไม่ใช่ Bug
+
+แต่เป็นข้อจำกัดของ Calibration Method ที่ใช้
+
+---
+
+# Lab 5 Mental Model
+
+ตอนนี้ Decision System มี flow:
+
+```text
+                  Context
+                     │
+                     ▼
+               Decision Model
+                     │
+              Action Scores
+                     │
+               ┌─────┴─────┐
+               ▼           ▼
+             Top 1       Top 2
+               │           │
+               └─────┬─────┘
+                     ▼
+                   Margin
+                     │
+                     ▼
+                 Calibrator
+                     │
+                     ▼
+          Calibrated Confidence
+                     │
+              ┌──────┴──────┐
+              │             │
+         High enough       Low
+              │             │
+              ▼             ▼
+           EXECUTE       ABSTAIN
+                           │
+                           ▼
+                      System 2 /
+                      Human /
+                      More Tools
+```
+
+---
+
+# Mapping to AI Worker / Harness
+
+ในระบบจริง Action อาจเป็น:
+
+```text
+Direct LLM
+RAG
+SQL Agent
+Search
+Send Email
+Create Document
+Call API
+Human Escalation
+```
+
+Decision Model เลือกว่า:
+
+> Action ไหนเหมาะที่สุดใน Context นี้?
+
+Calibration ช่วยตอบว่า:
+
+> การตัดสินใจลักษณะนี้ ในอดีตน่าเชื่อถือเพียงใด?
+
+Abstention Policy ตอบว่า:
+
+> จากระดับความน่าเชื่อถือและ Risk ของงาน เราควรให้ AI ทำเองหรือไม่?
+
+---
+
+# ตัวอย่าง Low-risk / High-risk
+
+## Low-risk
+
+เช่น:
+
+```text
+สรุปบทความ
+แนะนำเอกสาร
+จัดหมวดหมู่ Ticket
+```
+
+ผิดแล้วผลกระทบน้อย
+
+อาจใช้:
+
+```text
+Confidence Threshold ต่ำกว่า
+→ Coverage สูง
+```
+
+---
+
+## High-risk
+
+เช่น:
+
+```text
+อนุมัติ Payment
+แก้ Master Data
+ส่ง Email ออกนอกองค์กร
+ลบข้อมูล
+```
+
+ผิดแล้วผลกระทบสูง
+
+อาจต้อง:
+
+```text
+Confidence Threshold สูง
+หรือ
+บังคับ Human Approval
+```
+
+ดังนั้นใน Production:
+
+```text
+Threshold เดียว
+อาจไม่เหมาะกับทุก Action
+```
+
+---
+
+# Key Lessons from Lab 5
+
+## 1. Prediction ไม่เท่ากับ Confidence
+
+```text
+"ฉันเลือก LLM"
+```
+
+กับ:
+
+```text
+"ฉันน่าเชื่อถือแค่ไหนที่เลือก LLM"
+```
+
+เป็นคนละคำถาม
+
+---
+
+## 2. Margin เป็น Signal ไม่ใช่ Probability
+
+```text
+Margin = Top1 - Top2
+```
+
+ช่วยบอกว่าการแข่งขันสูสีแค่ไหน
+
+แต่ไม่บอกตรง ๆ ว่า Decision ถูกกี่ %
+
+---
+
+## 3. Confidence ที่อยู่ในช่วง 0–1 ยังไม่ใช่ Probability
+
+```text
+0 <= confidence <= 1
+```
+
+ไม่เพียงพอ
+
+ต้องตรวจด้วยข้อมูลจริง
+
+---
+
+## 4. Calibration ให้ความหมายเชิง Empirical
+
+Calibration พยายามตอบ:
+
+> Decision ที่มี signal แบบนี้ ในข้อมูลที่ผ่านมา ถูกจริงกี่เปอร์เซ็นต์?
+
+---
+
+## 5. Calibration ไม่ได้ทำให้ Model ฉลาดขึ้น
+
+```text
+Before Calibration
+Accuracy = 86.23%
+
+After Calibration
+Accuracy = 86.23%
+```
+
+เหมือนเดิม
+
+Calibration เปลี่ยน:
+
+```text
+ความหมายของ Confidence
+```
+
+ไม่ใช่:
+
+```text
+ความสามารถในการเลือก Action
+```
+
+---
+
+## 6. AI ไม่จำเป็นต้องทำเองทุกครั้ง
+
+AI Worker ที่ดีอาจไม่ใช่ระบบที่:
+
+```text
+Automation = 100%
+```
+
+แต่เป็นระบบที่:
+
+```text
+ทำเองเมื่อ Evidence เพียงพอ
+และ
+รู้ว่าเมื่อไรควรส่งต่อ
+```
+
+---
+
+## 7. Coverage ต้องดูคู่กับ Accuracy
+
+```text
+Selective Accuracy = 100%
+```
+
+อาจไม่มีความหมายถ้า:
+
+```text
+Coverage = 1%
+```
+
+ดังนั้นต้องดู:
+
+```text
+Coverage
+Selective Accuracy
+Wrong Autonomous Actions
+```
+
+พร้อมกัน
+
+---
+
+## 8. Global Calibration อาจซ่อน Local Failure
+
+Overall ECE ที่ดีมาก ไม่ได้แปลว่า Calibration ดีทุก Context
+
+ต้องตรวจบริเวณสำคัญแยกด้วย
+
+---
+
+# Summary: Lab 1 → Lab 5
+
+หลังจาก Lab 1–5 เราได้ Mental Model ต่อเนื่อง:
+
+```text
+Lab 1 — Bandit
+"What tends to work best?"
+        │
+        ▼
+Lab 2 — Constraint / Pruner
+"What am I allowed to do?"
+        │
+        ▼
+Lab 3 — Context
+"What works best in this situation?"
+        │
+        ▼
+Lab 4 — Generalization
+"What about a situation I have never seen exactly?"
+        │
+        ▼
+Lab 5 — Confidence / Calibration / Abstention
+"How much should I trust this decision,
+and should I act autonomously?"
+```
+
+หรือย่อเป็นภาษาไทย:
+
+```text
+เลือกอะไรดี?
+    ↓
+อะไรทำได้?
+    ↓
+สถานการณ์นี้ควรเลือกอะไร?
+    ↓
+สถานการณ์ใหม่จะประมาณได้ไหม?
+    ↓
+เชื่อการตัดสินใจนี้ได้แค่ไหน?
+    ↓
+ควรทำเอง หรือควรส่งต่อ?
+```
+
+---
+
+# Next Direction
+
+Lab ต่อไปควรศึกษาว่า:
+
+> ถ้าความเสียหายของ Action แต่ละชนิดไม่เท่ากัน เราควรใช้ Confidence Threshold เดียวกันหรือไม่?
+
+ตัวอย่าง:
+
+```text
+ตอบ FAQ ผิด
+        ≠
+ส่ง Email ผิด
+        ≠
+อนุมัติ Payment ผิด
+        ≠
+ลบข้อมูลผิด
+```
+
+จึงนำไปสู่หัวข้อถัดไป:
+
+```text
+Risk-aware Decision
+Cost-aware Decision
+Expected Utility
+Action-specific Thresholds
+```
+
+ซึ่งจะทำให้ระบบขยับจาก:
+
+```text
+"เลือก Action ที่น่าจะดีที่สุด"
 ```
 
 ไปสู่:
 
 ```text
-"เลือกเมื่อมีหลักฐานเพียงพอ
-และรู้ว่าเมื่อไรไม่ควรเดา"
+"เลือก Action ที่ให้ประโยชน์เหมาะสม
+เมื่อคำนึงถึง Reward, Cost, Risk
+และ Confidence"
 ```
