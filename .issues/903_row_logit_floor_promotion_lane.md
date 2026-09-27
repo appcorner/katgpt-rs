@@ -20,7 +20,7 @@
 
 ## Non-goals
 
-- The **default flip** (`ForwardContext.logit_floor: None` → the 8-bit policy) is the owner act: every precondition it names is now met and recorded (Bench 902), and the flip itself is one `Some(RowLogitFloorPolicy { n_sink: 4, bits: 8, tv: 1e-3, width_ctx: None })` in riir-infer — deliberately NOT made this session (riir-infer carries sibling WIP; a production-numerics default change belongs to its own owner-greenlit commit).
+- The **default flip** is the owner act — and it is a TWO-PART change, not a one-liner (verdict-reviewed 2026-09-27, AGREE with corrections): (i) riir-infer has NO default features today, so promoting `row_logit_floor` makes it the crate's first default feature — a build-surface change that pulls `katgpt-core/row_logit_floor` into every riir-infer build — and (ii) the `#[cfg]`-gated field default (`src/transformer/mod.rs:443`) goes `None` → `Some(...)`. **Scope caveat:** `attend_row` is shared by the gemma-2 AND llama forwards, and every model-level walk on record (Bench 003, Bench 902's family walk) is gemma-2-2b — a global default would change llama decode numerics with no model-level walk behind it. Before any global flip: either scope the default per-architecture (gemma-2 forward) or run a llama per-family walk first. All measured gates the issue demanded are green (Bench 902); what remains is a consumer-default decision in another repo, and it is staged, not deferred.
 - The contingent BO arm of riir-infer 011's cousin (katgpt-rs 898) is unrelated and stays blocked on the BO-trained checkpoint.
 
 Session: issue011-t3c-harvest

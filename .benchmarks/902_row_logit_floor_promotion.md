@@ -77,7 +77,7 @@ Perf axis: **dead heat** — the whole-step G2 medians differ by ≤ 0.6 pp betw
 
 ## Verdict
 
-All four Issue 903 boxes hold: per-family retention walk (no family concentration, zero confident flips), full-step G2 (latency-neutral-to-positive at both widths, two reproducing runs), G3 (2075 lib tests + Bench 888's full GOAT green at the feature), G4 (0 allocs including the envelope tally). **The GOAT holds at 8-bit.** The primitive stays opt-in: flipping `ForwardContext.logit_floor: None` to a default policy is the owner act named in the issue's non-goals — everything it needs is now on record (this bench + the `RowLogitFloorPolicy { n_sink: 4, bits: 8, tv: 1e-3, width_ctx: None }` shape), and riir-infer carries sibling WIP this session, so the flip was deliberately not made here.
+All four Issue 903 boxes hold: per-family retention walk (no family concentration, zero confident flips), full-step G2 (latency-neutral-to-positive at both widths, two reproducing runs), G3 (2075 lib tests + Bench 888's full GOAT green at the feature), G4 (0 allocs including the envelope tally). **The GOAT holds at 8-bit.** The primitive stays opt-in: the default flip is the owner act, verdict-reviewed AGREE (2026-09-27) — and it is a TWO-part change (riir-infer's first default feature + the `#[cfg]`-gated field default), with an open scope question: `attend_row` is shared by the gemma-2 and llama forwards and every model-level walk on record is gemma-2-2b, so a global default would reach llama with no model-level walk (per-architecture scope, or a llama walk, first). What the flip needs is recorded in Issue 903's non-goals; the measured evidence here is final.
 
 ## Reading it honestly
 
