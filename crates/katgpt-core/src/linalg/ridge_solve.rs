@@ -592,8 +592,17 @@ pub fn ridge_solve_woodbury_f32(
     d_h: usize,
     n_out: usize,
 ) {
-    match try_ridge_solve_woodbury_f32(w_t, l_scratch, z_scratch, sample_gram_reg, y, x, n, d_h, n_out)
-    {
+    match try_ridge_solve_woodbury_f32(
+        w_t,
+        l_scratch,
+        z_scratch,
+        sample_gram_reg,
+        y,
+        x,
+        n,
+        d_h,
+        n_out,
+    ) {
         Ok(()) => {}
         Err(e) => panic!(
             "matrix not positive definite in cholesky_f32 (pivot {} < -{})",
@@ -751,9 +760,15 @@ mod tests {
         let mut l2 = vec![0.0; 4];
         let err = try_cholesky_f32(&mut l2, &a_indef, 2).unwrap_err();
         assert!(approx_eq(err.pivot, -2.5, 1e-5), "pivot={}", err.pivot);
-        assert!(err.pivot <= -err.tol, "pivot {} vs tol {}", err.pivot, err.tol);
         assert!(
-            err.to_string().starts_with("matrix not positive definite (pivot"),
+            err.pivot <= -err.tol,
+            "pivot {} vs tol {}",
+            err.pivot,
+            err.tol
+        );
+        assert!(
+            err.to_string()
+                .starts_with("matrix not positive definite (pivot"),
             "display={}",
             err
         );
@@ -788,12 +803,20 @@ mod tests {
         let mut w_t = vec![0.0; 2];
         let mut l = vec![0.0; n * n];
         let mut z = vec![0.0; n];
-        let err = try_ridge_solve_woodbury_f32(
-            &mut w_t, &mut l, &mut z, &sample_gram, &y, &x, n, 2, 1,
-        )
-        .unwrap_err();
-        assert!(err.pivot <= -err.tol, "pivot {} vs tol {}", err.pivot, err.tol);
-        assert!(err.pivot < -1e6, "expected the floor-clamp cascade, pivot={}", err.pivot);
+        let err =
+            try_ridge_solve_woodbury_f32(&mut w_t, &mut l, &mut z, &sample_gram, &y, &x, n, 2, 1)
+                .unwrap_err();
+        assert!(
+            err.pivot <= -err.tol,
+            "pivot {} vs tol {}",
+            err.pivot,
+            err.tol
+        );
+        assert!(
+            err.pivot < -1e6,
+            "expected the floor-clamp cascade, pivot={}",
+            err.pivot
+        );
     }
 
     #[test]
@@ -812,12 +835,32 @@ mod tests {
         let mut w_try = vec![0.0; d_h];
         let mut l1 = vec![0.0; n * n];
         let mut z1 = vec![0.0; n];
-        try_ridge_solve_woodbury_f32(&mut w_try, &mut l1, &mut z1, &sample_gram, &y, &x, n, d_h, 1)
-            .unwrap();
+        try_ridge_solve_woodbury_f32(
+            &mut w_try,
+            &mut l1,
+            &mut z1,
+            &sample_gram,
+            &y,
+            &x,
+            n,
+            d_h,
+            1,
+        )
+        .unwrap();
         let mut w_panic = vec![0.0; d_h];
         let mut l2 = vec![0.0; n * n];
         let mut z2 = vec![0.0; n];
-        ridge_solve_woodbury_f32(&mut w_panic, &mut l2, &mut z2, &sample_gram, &y, &x, n, d_h, 1);
+        ridge_solve_woodbury_f32(
+            &mut w_panic,
+            &mut l2,
+            &mut z2,
+            &sample_gram,
+            &y,
+            &x,
+            n,
+            d_h,
+            1,
+        );
         assert_eq!(w_try, w_panic, "try/panicking forms must be bit-identical");
     }
 }
