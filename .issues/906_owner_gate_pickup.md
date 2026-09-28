@@ -4,5 +4,5 @@
 
 ## Items
 
-- [ ] E12 — base-model recirculation check blocked on Gemma license + HF token (evidence `.benchmarks/668:71`): prep a one-pager with the two options — (a) accept the Gemma license + provision an HF token to the 4090 env, or (b) retire the check as permanently blocked (IT-only evidence stands) — for the owner to pick.
+- [x] E12 — **ONE-PAGER PREPPED 2026-09-28** (`.plans/611_e12_gemma_base_model_options.md`): both options costed + a verdict row for the owner; agent recommendation on file is **(b) retire** (the negative is 12/12 harmful cells with a stable rate; the IT-vs-base caveat refines a negative, it does not flip it). Freshness facts found while prepping: the paper-scale Run 3 NEVER COLLECTED (task `Ready`, no output file — addendum landed in Bench 668), and both boxes re-verified to carry only IT-tuned Gemma GGUFs. **OWNER-GATED: the (a)/(b) pick lands on the owner's mark.**
 - [ ] E13 — workspace `rust-version` pin (evidence `HISTORY.md:3148`): prep the `[workspace.package] rust-version` patch + the list of ~30 affected manifests; land only on owner go.
