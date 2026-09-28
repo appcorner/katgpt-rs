@@ -2,7 +2,7 @@
 
 **Status:** OPEN — agent-pickupable prep tasks; executions stay owner-gated.
 
-Master: `../riir-ai/.issues/1016_workspace_owner_gated_decisions_summary.md` (moved from katgpt-rs 905, owner direction 2026-09-28). Local record: `.issues/906_owner_gate_pickup.md`.
+Local record: `.issues/906_owner_gate_pickup.md`. Cross-workspace context lives in the private workspace hub and is intentionally not linked from this public repo.
 
 ## Tasks
 
