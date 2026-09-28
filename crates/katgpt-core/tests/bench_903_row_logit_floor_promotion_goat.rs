@@ -211,8 +211,7 @@ fn main() {
         let codec6 = LogitCodec::new(6);
         let (mut s0, mut p) = (vec![0.0f32; n], vec![0.0f32; n]);
         let (mut s1, mut s2) = (vec![0.0f32; n], vec![0.0f32; n]);
-        let (mut o_plain, mut o8, mut o6) =
-            (vec![0.0f32; d], vec![0.0f32; d], vec![0.0f32; d]);
+        let (mut o_plain, mut o8, mut o6) = (vec![0.0f32; d], vec![0.0f32; d], vec![0.0f32; d]);
         let (mut lut8, mut lut6) = ([0.0f32; 256], [0.0f32; 256]);
         let (mut st8, mut st6) = (FloorStats::default(), FloorStats::default());
         decode_step_plain(&h, scale, &mut s0, &mut p, &mut o_plain);

@@ -324,12 +324,12 @@ impl RunawayStats {
                 (ratios[n / 2 - 1] + ratios[n / 2]) / 2.0
             }
         };
-        let p_cap = if n == 0 { 0.0 } else { at_cap as f32 / n as f32 };
-        Self {
-            r_median,
-            p_cap,
-            n,
-        }
+        let p_cap = if n == 0 {
+            0.0
+        } else {
+            at_cap as f32 / n as f32
+        };
+        Self { r_median, p_cap, n }
     }
 }
 
@@ -565,7 +565,10 @@ mod tests {
         let s0 = score(&row, 1);
         let s1 = score(&row, 2);
         let s2 = score(&row, 10);
-        assert!(s0 > s1 && s1 > s2, "score must decay with age: {s0} {s1} {s2}");
+        assert!(
+            s0 > s1 && s1 > s2,
+            "score must decay with age: {s0} {s1} {s2}"
+        );
     }
 
     #[test]
@@ -586,9 +589,7 @@ mod tests {
         // Sanity: at k = n the selection is the full unpinned set in
         // eviction-priority order (score asc, ties ascending index).
         let mut expected: Vec<usize> = (0..32).filter(|&i| !pinned[i]).collect();
-        expected.sort_by(|&a, &b| {
-            float_order::cmp_for_min(scores[a], scores[b]).then(a.cmp(&b))
-        });
+        expected.sort_by(|&a, &b| float_order::cmp_for_min(scores[a], scores[b]).then(a.cmp(&b)));
         assert_eq!(select_evict(&scores, 32, &pinned), expected);
     }
 
@@ -744,30 +745,63 @@ mod tests {
     fn null_bar_strictly_requires_recall_beating_the_pinned_null() {
         // Equal recall: the null wins on cost — the tie hands the slot to
         // the null, it does not split it.
-        let policy = PolicyControl { recall: 0.5, keystone_survival: 1.0 };
-        let null = PolicyControl { recall: 0.5, keystone_survival: 1.0 };
+        let policy = PolicyControl {
+            recall: 0.5,
+            keystone_survival: 1.0,
+        };
+        let null = PolicyControl {
+            recall: 0.5,
+            keystone_survival: 1.0,
+        };
         assert!(
             !beats_random_prompt_pin(&policy, &null),
             "a tie must NOT keep a scored policy's slot (the null is cheaper)"
         );
         // Strictly better recall passes.
-        let better = PolicyControl { recall: 0.5 + 1e-6, keystone_survival: 1.0 };
+        let better = PolicyControl {
+            recall: 0.5 + 1e-6,
+            keystone_survival: 1.0,
+        };
         assert!(beats_random_prompt_pin(&better, &null));
         // Strictly worse recall fails.
-        let worse = PolicyControl { recall: 0.25, keystone_survival: 1.0 };
+        let worse = PolicyControl {
+            recall: 0.25,
+            keystone_survival: 1.0,
+        };
         assert!(!beats_random_prompt_pin(&worse, &null));
     }
 
     #[test]
     fn null_bar_fails_closed_on_non_finite_recall() {
-        let null = PolicyControl { recall: 1.0, keystone_survival: 1.0 };
-        let nan_policy = PolicyControl { recall: f32::NAN, keystone_survival: 1.0 };
-        assert!(!beats_random_prompt_pin(&nan_policy, &null), "NaN is not a pass");
-        let inf_policy = PolicyControl { recall: f32::INFINITY, keystone_survival: 1.0 };
+        let null = PolicyControl {
+            recall: 1.0,
+            keystone_survival: 1.0,
+        };
+        let nan_policy = PolicyControl {
+            recall: f32::NAN,
+            keystone_survival: 1.0,
+        };
+        assert!(
+            !beats_random_prompt_pin(&nan_policy, &null),
+            "NaN is not a pass"
+        );
+        let inf_policy = PolicyControl {
+            recall: f32::INFINITY,
+            keystone_survival: 1.0,
+        };
         assert!(!beats_random_prompt_pin(&inf_policy, &null));
-        let nan_null = PolicyControl { recall: f32::NAN, keystone_survival: 1.0 };
-        let policy = PolicyControl { recall: 0.9, keystone_survival: 1.0 };
-        assert!(!beats_random_prompt_pin(&policy, &nan_null), "unfair null is not a pass");
+        let nan_null = PolicyControl {
+            recall: f32::NAN,
+            keystone_survival: 1.0,
+        };
+        let policy = PolicyControl {
+            recall: 0.9,
+            keystone_survival: 1.0,
+        };
+        assert!(
+            !beats_random_prompt_pin(&policy, &nan_null),
+            "unfair null is not a pass"
+        );
     }
 
     #[test]
@@ -775,8 +809,14 @@ mod tests {
         // A policy that loses recall to the pinned null on a real-shaped
         // comparison (mass_age 0.5 vs pinned-random 1.0 on this fixture's
         // cap=32 regime) fails even with perfect keystone survival.
-        let policy = PolicyControl { recall: 0.5, keystone_survival: 1.0 };
-        let null = PolicyControl { recall: 1.0, keystone_survival: 1.0 };
+        let policy = PolicyControl {
+            recall: 0.5,
+            keystone_survival: 1.0,
+        };
+        let null = PolicyControl {
+            recall: 1.0,
+            keystone_survival: 1.0,
+        };
         assert!(!beats_random_prompt_pin(&policy, &null));
     }
 

@@ -369,7 +369,11 @@ mod tests {
         let queries_before = t.queries();
         t.gather_rows(&(0..8).collect::<Vec<_>>());
         assert_eq!(t.len(), 8);
-        assert_eq!(t.queries(), queries_before, "gather must not re-phase buckets");
+        assert_eq!(
+            t.queries(),
+            queries_before,
+            "gather must not re-phase buckets"
+        );
         for i in 0..8 {
             assert_eq!(t.specificity(i), spec_before[i]);
             assert_eq!(t.mass_ema(i), mu_before[i]);

@@ -119,7 +119,8 @@ impl LoopDeepStats {
     pub fn logit_snapshots(&self) -> impl Iterator<Item = &[f32]> {
         // `max(1)` keeps `chunks_exact` total before the first capture (the
         // buffer is empty then, so it yields nothing either way).
-        self.logit_snapshot_buf.chunks_exact(self.logit_stride.max(1))
+        self.logit_snapshot_buf
+            .chunks_exact(self.logit_stride.max(1))
     }
 }
 
@@ -424,7 +425,10 @@ mod tests {
         let naive: f32 = big.iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!(!naive.is_finite(), "expected the naive norm to overflow");
         let r = robust_norm(&big);
-        assert!(r.is_finite() && r > 0.0, "robust_norm must stay finite here");
+        assert!(
+            r.is_finite() && r > 0.0,
+            "robust_norm must stay finite here"
+        );
         // Ratio preserved: robust_norm(big) / robust_norm([1, -1, 2]) == 1e24.
         let small = [1.0f32, -1.0, 2.0];
         let ratio = r / robust_norm(&small);
