@@ -32,14 +32,25 @@
 //! calibration must never reorder decisions, so ranking and every
 //! threshold-optimal decision are preserved by construction (G3).
 //!
-//! Output-side saturation guard (Issue 909 / reflex Issue 056): monotone in
-//! the reals is not monotone in the floats. A steep refit over a narrow
+//! Output-side ranking guard (Issues 909/910 / reflex Issue 056): monotone
+//! in the reals is not monotone in the floats. A steep refit over a narrow
 //! confidence band maps the whole window into a few f32 buckets (measured:
 //! 1–3 distinct mapped values of 200–500 raw on the reflex wide-label
 //! suites) — ranking consumers tie-break to index order and the calibrated
-//! key ranks WORSE than raw. `refit` refuses such a fit (parameters stay
-//! identity), preserving the G3 promise in f32 arithmetic, not just over
-//! the reals.
+//! key ranks WORSE than raw. `refit` refuses any fit whose map degrades the
+//! evidence window's own AUC (ties only harm when they merge informative
+//! pairs), preserving G3's promise in f32 arithmetic, not just over the
+//! reals — while still allowing a signal-free window's honest
+//! constant-at-base-rate map (both AUCs at chance).
+//!
+//! Solver (Issue 910): the Lin–Lin–Weng 2007 form of Platt's solve —
+//! base-rate start `(0, ln((n⁺+1)/(n⁻+1)))` + Armijo-backtracked Newton.
+//! Platt's original undamped full step from the identity start is the
+//! documented flaw: on a narrow-z window the first Hessian is near-singular
+//! and the step lands the iterate in a saturated corner where the Hessian
+//! collapses (the Issue-909 stall, measured 10.8×/23× above the achievable
+//! loss on the real reflex windows; an f64 mirror stalls identically — not
+//! a precision defect).
 //!
 //! UQ "Report the Floor" rule (Research 322 / Plan 340): a calibrated gate
 //! must still beat the dumb baselines — the constant base-rate predictor and
@@ -64,20 +75,30 @@ pub const W_MIN: f32 = 1.0e-3;
 const NEWTON_MAX_ITERS: usize = 32;
 /// Convergence tolerance on the parameter-update norm.
 const NEWTON_TOL: f32 = 1.0e-7;
-/// Output-side saturation floor (Issue 909 / reflex Issue 056): a refit is
-/// refused (parameters stay identity) when the fitted map collapses the
-/// window's DISTINCT f32 values below this fraction of the raw window's.
-/// The `W_MIN` projection preserves order over the reals; this one preserves
-/// it in the floats — a steep fit over a narrow confidence band lands every
-/// mapped value in one f32 bucket (measured on the reflex wide-label
-/// suites: 1–3 distinct mapped values of 200–500 raw ones) and ranking
-/// consumers tie-break to index order, ranking the calibrated key WORSE
-/// than raw. The measured regimes separate by two orders of magnitude
-/// (broken ≤ 0.75% retained, sane control 100%); 0.5 admits incidental
-/// tail merges on large windows while refusing the collapse class.
-const SATURATION_DISTINCT_FRACTION: f32 = 0.5;
-/// Commitment format version (bump on any change to the canonical bytes).
-const COMMITMENT_VERSION: u8 = 1;
+/// Armijo backtracking constants (Lin–Lin–Weng 2007): accept a step of
+/// length `t` when `L(θ+tΔ) ≤ L(θ) + ARMIJO_C·t·∇L·Δ`; halve up to
+/// [`LS_MAX_HALVINGS`] times. Platt's original undamped full step is the
+/// known flaw this fixes (Issue 910): from the identity start on a
+/// narrow-z window, the first Hessian is near-singular and the full step
+/// lands the iterate in a saturated corner where the Hessian collapses —
+/// the loop then breaks at a point up to ~15× the achievable loss.
+const ARMIJO_C: f64 = 1e-4;
+const LS_MAX_HALVINGS: usize = 32;
+/// Ranking-guard floor tolerance (Issues 909/910): the refusal threshold is
+/// one standard error of the window AUC itself — `0.5/√min(n₊, n₋)`, the
+/// conservative null bound (A = ½). A monotone map's AUC drop within
+/// sampling noise is not evidence of degradation: a signal-free window's
+/// honest constant-at-base-rate map ties everything (cal AUC exactly ½)
+/// while the RAW sample AUC drifts above ½ by chance (~½ of all noise
+/// windows) — refusing those (the fixed-tolerance form of this guard)
+/// forced identity at 2.3× the floor's loss. The Platt-stall class drops
+/// the AUC by ~0.35 against an SE of ~0.08 — still refused by a wide
+/// margin.
+const RANKING_AUC_TOLERANCE: f64 = 1e-6;
+/// Commitment format version (bump on any change to the canonical bytes or
+/// to the fit behavior — v2: the LLW solver fix, Issue 910; the same
+/// evidence window now produces different (correct) parameters).
+const COMMITMENT_VERSION: u8 = 2;
 
 /// A single-direction calibrated sigmoid gate.
 ///
@@ -171,10 +192,11 @@ impl SigmoidGateCalibrator {
     ///
     /// Deterministic solve on the smoothed-target logistic loss (Platt
     /// 1999): labels `t⁺ = (n⁺+1)/(n⁺+2)` / `t⁻ = 1/(n⁻+2)` keep the
-    /// problem strictly convex on separable windows. The fit is the
-    /// loss-argmin over {Newton-from-identity, near-constant base-rate,
-    /// identity} (Issue 909 — the identity-init Newton stalls in a
-    /// degenerate corner on narrow-z windows; see [`fit_window`]).
+    /// problem strictly convex on separable windows. The solver is the
+    /// Lin–Lin–Weng 2007 form (base-rate start + Armijo-backtracked
+    /// Newton — Platt's undamped identity-init iteration stalls in a
+    /// saturated corner on narrow-z windows; Issues 909/910), under a
+    /// three-candidate loss-argmin net (see [`fit_window`]).
     /// Identity parameters below `min_obs` occupancy. Returns `true` when
     /// the window was big enough to fit (parameters may still land on
     /// identity — refused by the saturation guard below).
@@ -184,13 +206,16 @@ impl SigmoidGateCalibrator {
     /// to [`W_MIN`] and `c` re-solved on the 1-D problem. The gate never
     /// inverts decisions from evidence.
     ///
-    /// Output-side saturation guard (Issue 909 / reflex Issue 056): a fit
-    /// whose mapped window collapses below f32 resolution — fewer distinct
-    /// mapped values than [`SATURATION_DISTINCT_FRACTION`] of the raw
-    /// window's — is refused and the parameters stay identity. Monotone in
-    /// the reals but tied in the floats destroys the ranking the
-    /// monotonicity guard exists to protect; identity keeps every distinct
-    /// value (and `apply`'s bit-identity fast path).
+    /// Output-side ranking guard (Issues 909/910 / reflex Issue 056): a fit
+    /// that DEGRADES the evidence window's own ranking quality — the mapped
+    /// confidences' rank-averaged AUC against the outcomes dropping below
+    /// the raw confidences' AUC — is refused and the parameters stay
+    /// identity. Monotone in the reals but tied in the floats destroys the
+    /// ranking the monotonicity guard exists to protect exactly when the
+    /// destroyed pairs were informative; identity keeps the raw ordering
+    /// (and `apply`'s bit-identity fast path). A signal-free window's honest
+    /// constant-at-base-rate map ties everything with both AUCs at chance
+    /// and passes.
     pub fn refit(&mut self) -> bool {
         let n = self.len;
         if n < self.min_obs.max(2) {
@@ -198,7 +223,7 @@ impl SigmoidGateCalibrator {
         }
         let (t, z) = self.smoothed_pairs();
         let (w, c) = fit_window(&t, &z);
-        if (w, c) != (1.0, 0.0) && !window_keeps_resolution(&z, w, c) {
+        if (w, c) != (1.0, 0.0) && !window_preserves_ranking(&z, &t, w, c) {
             self.w = 1.0;
             self.c = 0.0;
             return true;
@@ -303,14 +328,26 @@ fn solve_c_at_w(t: &[f32], z: &[f32], w: f32) -> f32 {
     c
 }
 
-/// Deterministic 2-parameter Newton solve on the smoothed-target logistic
-/// loss (Platt 1999), including the monotonicity projection — the solver
-/// half of [`SigmoidGateCalibrator::refit`], extracted so the Issue-909
-/// audit can compare the UNGUARDED production solve against an f64 mirror
-/// on the same window. Identity init; `w > 0` on return.
+/// Deterministic damped 2-parameter Newton solve on the smoothed-target
+/// logistic loss, including the monotonicity projection — the solver half
+/// of [`SigmoidGateCalibrator::refit`].
+///
+/// The Lin–Lin–Weng 2007 form of Platt's solver (the fix for Platt's
+/// original undamped iteration): start at the base-rate point
+/// `(0, ln((n⁺+1)/(n⁻+1)))` and take Newton steps under Armijo
+/// backtracking, so every accepted step strictly reduces the loss and a
+/// near-singular Hessian can no longer catapult the iterate into a
+/// saturated corner (the Issue-909/910 stall, measured 10.8×/23× above
+/// the achievable loss on the real reflex windows). Extracted from
+/// `refit` so the Issue-909 audit can compare the production solve
+/// against an f64 mirror on the same window. Identity-safe: `w > 0` on
+/// return (the `W_MIN` projection).
 fn solve_smoothed_mle(t: &[f32], z: &[f32]) -> (f32, f32) {
-    // Newton (loss to MINIMIZE): p ← p − H⁻¹∇L; identity init.
-    let (mut w, mut c) = (1.0f32, 0.0f32);
+    // LLW init: the base-rate start (never the identity — the identity's
+    // first Hessian is the near-singular one on narrow bands).
+    let n_pos = t.iter().filter(|&&ti| ti > 0.5).count() as f32;
+    let n_neg = t.len() as f32 - n_pos;
+    let (mut w, mut c) = (0.0f32, ((n_pos + 1.0) / (n_neg + 1.0)).ln());
     for _ in 0..NEWTON_MAX_ITERS {
         let (g0, g1, h00, h01, h11) = grad_hess(t, z, w, c);
         let det = h00 * h11 - h01 * h01;
@@ -320,14 +357,33 @@ fn solve_smoothed_mle(t: &[f32], z: &[f32]) -> (f32, f32) {
         let inv_det = 1.0 / det;
         let dw = -inv_det * (h11 * g0 - h01 * g1);
         let dc = -inv_det * (h00 * g1 - h01 * g0);
-        w += dw;
-        c += dc;
+        // Armijo backtracking (loss to MINIMIZE): accept the first step
+        // length meeting the sufficient-decrease condition; a step that
+        // cannot satisfy it after LS_MAX_HALVINGS ends the solve (the
+        // iterate is loss-monotone by construction).
+        let l0 = smoothed_loss(t, z, w, c);
+        let slope = (g0 * dw + g1 * dc) as f64; // < 0 for a descent direction
+        let mut step = 1.0f32;
+        let mut accepted = false;
+        for _ in 0..LS_MAX_HALVINGS {
+            let l_try = smoothed_loss(t, z, w + step * dw, c + step * dc);
+            if l_try <= l0 + ARMIJO_C * (step as f64) * slope {
+                accepted = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        if !accepted {
+            break;
+        }
+        w += step * dw;
+        c += step * dc;
         if !w.is_finite() || !c.is_finite() {
             w = W_MIN;
             c = 0.0;
             break;
         }
-        if dw * dw + dc * dc < NEWTON_TOL * NEWTON_TOL {
+        if (step * dw) * (step * dw) + (step * dc) * (step * dc) < NEWTON_TOL * NEWTON_TOL {
             break;
         }
     }
@@ -351,21 +407,23 @@ fn smoothed_loss(t: &[f32], z: &[f32], w: f32, c: f32) -> f64 {
     })
 }
 
-/// The Issue-909 refit: the loss-argmin over three deterministic candidates.
+/// The refit net (Issue 909/910): the loss-argmin over three deterministic
+/// candidates, UNDER the Lin–Lin–Weng solver.
 ///
-/// The audit (see the tests) measured the identity-init Newton stall: on a
-/// narrow-z window the first Hessian is near-singular (det ≈ (Σr)²·var(z)),
-/// the first step lands the iterate in a saturated corner where every
-/// `r = p(1−p)` collapses and the loop breaks — at a point up to ~10× the
-/// achievable loss (reflex banking77 window: 1051 at the stall vs ~97 for a
-/// constant-at-base-rate map). An f64 mirror stalls at the SAME point — a
-/// degenerate-init defect, not an f32-precision one. The repair takes the
-/// best of:
+/// The LLW solve (base-rate start + Armijo backtracking) reaches the
+/// smoothed MLE where Platt's undamped iteration stalled in a saturated
+/// corner at up to ~15× the achievable loss (measured on the real reflex
+/// windows — see the audit test). The argmin net underneath exists because
+/// the solver's stop conditions (det-break, halving budget, iteration cap)
+/// are all legitimate-but-imperfect: any residual suboptimality falls back
+/// to the better of:
 ///
-/// 1. the Newton result (optimal on well-conditioned windows — unchanged
-///    behavior wherever the fit was already sane);
+/// 1. the LLW solve result (optimal wherever the solve converged — the
+///    measured case on all three fixture windows, including a sharp
+///    T=0.115 fit on the banking77 band the stall used to destroy);
 /// 2. the near-constant base-rate candidate `(W_MIN, solve_c_at_w(W_MIN))`
-///    — the honest answer when the window carries no z-usable signal;
+///    — the Report-the-Floor floor, only when the window genuinely carries
+///    no z-usable signal (a fit that cannot beat it is not a fit);
 /// 3. identity `(1, 0)` — keep the raw readout when even the constant map
 ///    loses to it.
 ///
@@ -390,25 +448,64 @@ fn fit_window(t: &[f32], z: &[f32]) -> (f32, f32) {
     (w, c)
 }
 
-/// Saturation-guard predicate (Issue 909 / reflex Issue 056): does mapping
-/// the window's logits through `sigmoid(w·z + c)` preserve at least
-/// [`SATURATION_DISTINCT_FRACTION`] of the distinct f32 values the raw
-/// window carries? Equal `z` stay equal under any map; distinct `z` can
-/// only be merged BY f32 rounding — and only when the fit saturates the
-/// sigmoid (a steep `w` over a narrow band) or flattens it past resolution.
-/// `z` must be finite (`logit_clamped` output); the raw window is skipped
-/// when it is already fully tied (`len ≤ 1` — ranking cannot degrade).
-fn window_keeps_resolution(z: &[f32], w: f32, c: f32) -> bool {
-    let mut sorted = z.to_vec();
-    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    sorted.dedup();
-    if sorted.len() <= 1 {
+/// Rank-averaged AUC (Mann–Whitney) with ties credited ½: `P(score₊ >
+/// score₋) + ½·P(=)` over every pos/neg pair. Deterministic; `f64::NAN`
+/// for a single-class set (the caller skips the guard there — no ranking
+/// claim to protect).
+fn auc_rank_average(keys: &[f32], ys: &[bool]) -> f64 {
+    let n_pos = ys.iter().filter(|y| **y).count();
+    let n_neg = ys.len() - n_pos;
+    if n_pos == 0 || n_neg == 0 {
+        return f64::NAN;
+    }
+    let mut idx: Vec<usize> = (0..keys.len()).collect();
+    idx.sort_unstable_by(|&a, &b| keys[a].partial_cmp(&keys[b]).unwrap());
+    let mut ranks = vec![0.0f64; keys.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i;
+        while j + 1 < idx.len() && keys[idx[j + 1]] == keys[idx[i]] {
+            j += 1;
+        }
+        let avg = (i + j) as f64 / 2.0 + 1.0;
+        for &k in &idx[i..=j] {
+            ranks[k] = avg;
+        }
+        i = j + 1;
+    }
+    let sum_pos: f64 = ranks
+        .iter()
+        .zip(ys)
+        .filter(|(_, y)| **y)
+        .map(|(r, _)| r)
+        .sum();
+    let (n_pos, n_neg) = (n_pos as f64, n_neg as f64);
+    (sum_pos - n_pos * (n_pos + 1.0) / 2.0) / (n_pos * n_neg)
+}
+
+/// Ranking-guard predicate (Issues 909/910 / reflex Issue 056): does the
+/// fitted map `sigmoid(w·z + c)` preserve the evidence window's own ranking
+/// quality — the mapped AUC staying at or above the raw AUC (within
+/// [`RANKING_AUC_TOLERANCE`])? A monotone map can only tie-merge (never
+/// reorder); a merge is harm exactly when it merges an informative pair,
+/// which the AUC drop measures directly. The Platt-stall class (every
+/// window value mapped into one f32 bucket) reads as cal-AUC ≈ ½ vs a
+/// raw AUC ≫ ½ — refused; a signal-free window's honest constant map ties
+/// everything with BOTH AUCs at chance — allowed. Single-class windows
+/// (AUC undefined) pass vacuously.
+fn window_preserves_ranking(z: &[f32], t: &[f32], w: f32, c: f32) -> bool {
+    let ys: Vec<bool> = t.iter().map(|&ti| ti > 0.5).collect();
+    let auc_raw = auc_rank_average(z, &ys);
+    if auc_raw.is_nan() {
         return true;
     }
-    let mut mapped: Vec<f32> = sorted.iter().map(|&zi| sigmoid(w.mul_add(zi, c))).collect();
-    mapped.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    mapped.dedup();
-    mapped.len() as f32 >= SATURATION_DISTINCT_FRACTION * sorted.len() as f32
+    let mapped: Vec<f32> = z.iter().map(|&zi| sigmoid(w.mul_add(zi, c))).collect();
+    let auc_cal = auc_rank_average(&mapped, &ys);
+    // One standard error of the AUC under the conservative null (A = ½):
+    // a drop within sampling noise is not evidence of degradation.
+    let n_min = ys.iter().filter(|y| **y).count().min(ys.len() - ys.iter().filter(|y| **y).count());
+    let se = 0.5 / (n_min.max(1) as f64).sqrt();
+    auc_cal >= auc_raw - se.max(RANKING_AUC_TOLERANCE)
 }
 
 /// Gradient and Hessian (loss convention: log-loss to MINIMIZE) of the
@@ -957,7 +1054,7 @@ mod tests {
         assert_eq!(expected_calibration_error(&perfect, &y, 10), 0.0);
         // Uniform-vs-0.5 outcomes: ECE = |0.5 − ȳ| style check via bins.
         let uni = vec![0.5, 0.5, 0.5, 0.5];
-        let y2 = vec![0.0, 1.0, 0.0, 1.0];
+        let y2 = vec![1.0, 0.0, 1.0, 0.0];
         assert!((expected_calibration_error(&uni, &y2, 10) - 0.0).abs() < 1e-6);
     }
 
@@ -997,31 +1094,30 @@ mod tests {
         cal
     }
 
-    /// The reflex-measured collapse class on the REAL windows: the
-    /// identity-init Newton stalls in the saturated corner (banking77:
-    /// (w≈1.23, c≈34.5) — ALL confs at exactly 1.0; xnli_en: (w≈5.6e5,
-    /// c≈1.4e6) — 93% of confs at 0.0), and the Issue-909 fallback replaces
-    /// it with the loss-argmin candidate — the near-constant base-rate map.
-    /// The result is monotone AND untied: the calibrated ranking key equals
-    /// the raw one (order preserved, distinct values preserved), and the
-    /// calibrated conf lands at the window's base rate (ECE-honest).
+    /// The reflex-measured collapse class on the REAL windows — at the LLW
+    /// solver the fits are the TRUE smoothed MLEs (the Issue-910 review's
+    /// reference optima, reproduced by production): banking77 recovers a
+    /// SHARP temperature (T≈0.115, w≈8.67) over the narrow band the Platt
+    /// stall used to destroy — the band carries real signal (raw window
+    /// AUC 0.85); xnli_en gets its flat-but-informative T≈5.2 fit. Both are
+    /// monotone AND untied in f32: the calibrated ranking key equals the raw
+    /// one (the Issue-056 harm gone), and the fits beat the constant floor
+    /// (Report-the-Floor at the window level — see the audit test).
     #[test]
-    fn degenerate_narrow_windows_get_the_loss_optimal_fallback() {
-        for (suite, base_rate_lo, base_rate_hi) in [
-            ("banking77", 0.74f32, 0.88f32),
-            ("xnli_en", 0.52f32, 0.66f32),
+    fn real_windows_get_the_true_mle_at_the_llw_solver() {
+        for (suite, w_lo, w_hi) in [
+            ("banking77", 6.0f32, 11.0f32),
+            ("xnli_en", 0.05f32, 0.6f32),
         ] {
             let pairs = load_window_fixture(suite);
             assert!(pairs.len() >= 64, "{suite}: window must clear min_obs");
             let cal = replay_window(&pairs);
             let (w, c) = cal.params_raw();
-            assert_eq!(w, W_MIN, "{suite}: the constant candidate must win");
-            let c_rate = (base_rate_lo + base_rate_hi) / 2.0;
-            let expected_c = (c_rate / (1.0 - c_rate)).ln();
             assert!(
-                ((expected_c - 0.6)..=(expected_c + 0.6)).contains(&c),
-                "{suite}: c={c} should sit near logit(base rate)={expected_c}"
+                (w_lo..=w_hi).contains(&w),
+                "{suite}: w={w} should be the reference MLE (≈{w_lo}..{w_hi})"
             );
+            assert!(c.is_finite(), "{suite}: c finite");
             // Monotone + untied over the window's own distinct confs: the
             // Issue-056 harm (tie-collapse to index order) is gone.
             let mut confs: Vec<f32> = pairs.iter().map(|p| p.0).collect();
@@ -1033,7 +1129,7 @@ mod tests {
             mapped.dedup();
             assert!(
                 mapped.len() as f32 >= 0.5 * distinct_before as f32,
-                "{suite}: guard must pass the fallback fit ({} distinct of {})",
+                "{suite}: guard must pass the LLW fit ({} distinct of {})",
                 mapped.len(),
                 distinct_before
             );
@@ -1046,19 +1142,135 @@ mod tests {
         }
     }
 
-    /// The sane control on the real data: massive_intent_en's Newton fit
-    /// (measured T=0.275 — band wide enough that the fit keeps f32
-    /// resolution and the loss beats any constant). The fallback must keep
-    /// it and the guard must not fire.
+    /// The sane control on the real data: massive_intent_en's fit (measured
+    /// T=0.275 — the LLW solve converges to the same optimum the old
+    /// identity-init Newton found on this well-conditioned window). The net
+    /// must keep the solver result and the guard must not fire.
     #[test]
-    fn fallback_keeps_the_sane_massive_fit() {
+    fn llw_keeps_the_sane_massive_fit() {
         let pairs = load_window_fixture("massive_intent_en");
         let cal = replay_window(&pairs);
         let (w, c) = cal.params_raw();
         assert!((w, c) != (1.0, 0.0), "the sane fit must survive");
-        assert!((3.5..3.8).contains(&w), "the Newton result must win (measured w≈3.63)");
+        assert!((3.5..3.8).contains(&w), "the reference MLE w≈3.63 must hold");
         let (t, _b) = cal.params();
         assert!((0.1..=1.0).contains(&t), "measured T≈0.275, got {t}");
+    }
+
+    /// Report-the-Floor at the WINDOW level (the Issue-910 review's held-out
+    /// demand): fit on the first half of each real window, then evaluate
+    /// log-loss + Brier on the held-out half against a constant base-rate
+    /// map derived from the same fit half.
+    ///
+    /// The fitted map must never lose to the floor, and on the signal-rich
+    /// banking77 band must strictly win.
+    #[test]
+    fn held_out_floor_comparison_on_real_windows() {
+        for suite in ["banking77", "xnli_en", "massive_intent_en"] {
+            let pairs = load_window_fixture(suite);
+            let split = pairs.len() / 2;
+            let (fit_half, eval_half) = pairs.split_at(split);
+            let mut cal = SigmoidGateCalibrator::new(512, 64);
+            for &(p, y) in fit_half {
+                cal.observe(p, y);
+            }
+            cal.refit();
+            let base = fit_half.iter().filter(|p| p.1).count() as f32 / fit_half.len() as f32;
+            let ll = |pred: &dyn Fn(f32) -> f32| -> (f64, f64) {
+                let (mut l, mut b) = (0.0f64, 0.0f64);
+                for &(p, y) in eval_half {
+                    let q = pred(p).clamp(1e-12, 1.0 - 1e-12) as f64;
+                    let y = f64::from(y);
+                    l -= y * q.ln() + (1.0 - y) * (1.0 - q).ln();
+                    b += (q - y) * (q - y);
+                }
+                (l / eval_half.len() as f64, b / eval_half.len() as f64)
+            };
+            let (ll_fit, b_fit) = ll(&|p| cal.apply(p));
+            let (ll_const, b_const) = ll(&|_| base);
+            eprintln!(
+                "  floor {suite}: fit ll={ll_fit:.4} brier={b_fit:.4} | constant ll={ll_const:.4} brier={b_const:.4} (base {base:.3})"
+            );
+            // Never worse than the floor (tie allowed — a genuinely
+            // signal-free window falls back to it by construction).
+            assert!(
+                ll_fit <= ll_const + 1e-9,
+                "{suite}: held-out log-loss {ll_fit} must not lose to the floor {ll_const}"
+            );
+            assert!(
+                b_fit <= b_const + 1e-9,
+                "{suite}: held-out Brier {b_fit} must not lose to the floor {b_const}"
+            );
+            if suite == "banking77" {
+                assert!(
+                    ll_fit < ll_const - 1e-3,
+                    "banking77's signal-rich band must strictly beat the floor held-out ({ll_fit} vs {ll_const})"
+                );
+            }
+        }
+    }
+
+    /// The synthetic property sweep (the Issue-910 review's demand): across
+    /// band widths × base rates × window sizes, with and without planted
+    /// z-signal, the refit (i) never loses to the constant base-rate floor
+    /// on its own window, (ii) never tie-collapses the mapped window, and
+    /// (iii) stays monotone. Deterministic RNG (no global draws).
+    #[test]
+    fn property_sweep_never_loses_the_floor_and_never_collapses() {
+        let mut n_checked = 0;
+        for band in [0.02f32, 0.1, 0.5, 2.0] {
+            for base in [0.2f32, 0.5, 0.8] {
+                for n in [64usize, 200] {
+                    for signal in [0.0f32, 2.0] {
+                        let mut rng = Rng::new(
+                            0x910_0001
+                                ^ (band.to_bits() as u64)
+                                ^ (base.to_bits() as u64)
+                                ^ (n as u64)
+                                ^ (signal.to_bits() as u64),
+                        );
+                        let z0 = -3.0f32;
+                        let mut cal = SigmoidGateCalibrator::new(512, 32);
+                        for i in 0..n {
+                            let z = z0 + band * (i as f32 + rng.f01()) / n as f32;
+                            // base rate via an intercept; signal via the slope.
+                            let p_true = sigmoid(signal.mul_add(z - z0 - band / 2.0, (base / (1.0 - base)).ln()));
+                            cal.observe(sigmoid(z), rng.bernoulli(p_true));
+                        }
+                        assert!(cal.refit(), "window must fit");
+                        let (t, zvec) = cal.smoothed_pairs();
+                        let (wf, cf) = cal.params_raw();
+                        let l_fit = smoothed_loss(&t, &zvec, wf, cf);
+                        // The floor: constant at the smoothed-target mean.
+                        let mean_t = (t.iter().map(|&ti| ti as f64).sum::<f64>()) / t.len() as f64;
+                        let l_const = smoothed_loss(&t, &zvec, W_MIN, (mean_t / (1.0 - mean_t)).ln() as f32);
+                        assert!(
+                            l_fit <= l_const + 1e-6,
+                            "band={band} base={base} n={n} signal={signal}: fit {l_fit} must not lose to the floor {l_const}"
+                        );
+                        // Ranking preserved on the window itself (the guard
+                        // invariant — distinct-count collapse WITHOUT AUC
+                        // harm is the honest constant answer and is fine).
+                        assert!(
+                            window_preserves_ranking(&zvec, &t, wf, cf),
+                            "band={band} base={base} n={n} signal={signal}: AUC degraded"
+                        );
+                        // Monotone over the sorted distinct z.
+                        let mut sorted = zvec.clone();
+                        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                        sorted.dedup();
+                        let mut prev = f32::MIN;
+                        for &zi in &sorted {
+                            let q = sigmoid(wf.mul_add(zi, cf));
+                            assert!(q >= prev, "monotone");
+                            prev = q;
+                        }
+                        n_checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(n_checked >= 48, "the sweep must cover ≥48 cells (got {n_checked})");
     }
 
     // ── Issue 909 repair 3: the Newton early-break audit ──
@@ -1101,10 +1313,11 @@ mod tests {
             .sum()
     }
 
-    /// f64 mirror of the production solve (`solve_smoothed_mle` structure
-    /// verbatim: identity init, 32 iterations, det early-break, step-norm
-    /// tolerance, non-finite guard, W_MIN projection with the 1-D c re-solve).
-    fn solve_f64_mirror(pairs: &[(f32, bool)]) -> (f64, f64) {
+    /// f64 mirror of the production LLW solve (`solve_smoothed_mle`
+    /// structure verbatim: base-rate start, Armijo-backtracked Newton, det
+    /// early-break, step-norm tolerance, non-finite guard, W_MIN projection
+    /// with the 1-D c re-solve) — the Issue-910 audit REFERENCE optimum.
+    fn solve_f64_reference(pairs: &[(f32, bool)]) -> (f64, f64) {
         let (t, z) = smoothed_pairs64(pairs);
         let grad_hess64 = |w: f64, c: f64| {
             t.iter().zip(&z).fold(
@@ -1116,6 +1329,12 @@ mod tests {
                     (g0 + d * zi, g1 + d, h00 + r * zi * zi, h01 + r * zi, h11 + r)
                 },
             )
+        };
+        let loss64 = |w: f64, c: f64| {
+            t.iter().zip(&z).fold(0.0f64, |acc, (&ti, &zi)| {
+                let q = sigmoid64(w.mul_add(zi, c)).clamp(1e-12, 1.0 - 1e-12);
+                acc - (ti * q.ln() + (1.0 - ti) * (1.0 - q).ln())
+            })
         };
         let solve_c_at_w64 = |w: f64| -> f64 {
             let mut c = 0.0f64;
@@ -1138,7 +1357,9 @@ mod tests {
             }
             c
         };
-        let (mut w, mut c) = (1.0f64, 0.0f64);
+        let n_pos = t.iter().filter(|&&ti| ti > 0.5).count() as f64;
+        let n_neg = t.len() as f64 - n_pos;
+        let (mut w, mut c) = (0.0f64, ((n_pos + 1.0) / (n_neg + 1.0)).ln());
         for _ in 0..NEWTON_MAX_ITERS {
             let (g0, g1, h00, h01, h11) = grad_hess64(w, c);
             let det = h00 * h11 - h01 * h01;
@@ -1148,14 +1369,30 @@ mod tests {
             let inv_det = 1.0 / det;
             let dw = -inv_det * (h11 * g0 - h01 * g1);
             let dc = -inv_det * (h00 * g1 - h01 * g0);
-            w += dw;
-            c += dc;
+            let l0 = loss64(w, c);
+            let slope = g0 * dw + g1 * dc;
+            let mut step = 1.0f64;
+            let mut accepted = false;
+            for _ in 0..LS_MAX_HALVINGS {
+                if loss64(w + step * dw, c + step * dc) <= l0 + ARMIJO_C * step * slope {
+                    accepted = true;
+                    break;
+                }
+                step *= 0.5;
+            }
+            if !accepted {
+                break;
+            }
+            w += step * dw;
+            c += step * dc;
             if !w.is_finite() || !c.is_finite() {
                 w = W_MIN as f64;
                 c = 0.0;
                 break;
             }
-            if dw * dw + dc * dc < (NEWTON_TOL as f64) * (NEWTON_TOL as f64) {
+            if (step * dw) * (step * dw) + (step * dc) * (step * dc)
+                < (NEWTON_TOL as f64) * (NEWTON_TOL as f64)
+            {
                 break;
             }
         }
@@ -1166,15 +1403,16 @@ mod tests {
         (w, c)
     }
 
-    /// The audit: on the REAL windows, is the production f32 solve's iterate
-    /// a (near-)optimal point of the smoothed loss — or a suboptimal stall?
-    /// The measured verdict (pinned below): the f32 loop and an f64 mirror
-    /// stall at the SAME extreme point (gap ≈ 0 — NOT an f32-precision
-    /// defect), that point is up to ~10× the loss of a constant-at-base-
-    /// rate map (the degenerate-init stall, not the smoothed MLE), and the
-    /// Issue-909 `fit_window` fallback takes over exactly there.
+    /// The Issue-910 audit: the production LLW solve must reach the f64
+    /// reference optimum on the REAL windows (within f32 noise), and the
+    /// reference optimum must BEAT the constant base-rate floor wherever
+    /// the window carries z-usable signal — the corrected adjudication from
+    /// the Issue-909 review (the round-1 three-candidate fallback shipped
+    /// the FLOOR on banking77 while the true MLE — a sharp T=0.115 fit over
+    /// [0.235, 0.9995] — sat 26% below it in loss; raw AUC on that window
+    /// is 0.85, the band carries real signal).
     #[test]
-    fn newton_stall_audit_on_real_windows() {
+    fn llw_solve_reaches_the_reference_optimum_on_real_windows() {
         for suite in ["banking77", "xnli_en", "massive_intent_en"] {
             let pairs = load_window_fixture(suite);
             let mut cal = SigmoidGateCalibrator::new(512, 64);
@@ -1182,66 +1420,73 @@ mod tests {
                 cal.observe(p, y);
             }
             let (t32, z32) = cal.smoothed_pairs();
-            let (w32, c32) = solve_smoothed_mle(&t32, &z32);
-            let (w64, c64) = solve_f64_mirror(&pairs);
-            let l_stall32 = smoothed_loss64(&pairs, w32 as f64, c32 as f64);
-            let l_stall64 = smoothed_loss64(&pairs, w64, c64);
-            eprintln!(
-                "  audit {suite}: stall f32 (w={w32:.4}, c={c32:.4}) loss={l_stall32:.4} | f64 (w={w64:.4}, c={c64:.4}) loss={l_stall64:.4} | gap={:.4}",
-                l_stall32 - l_stall64
-            );
-            // (a) NOT an f32-precision defect: the mirror stalls at the same
-            // point (within float-noise) with the same loss.
-            assert!(
-                l_stall32 - l_stall64 < 1e-3 * l_stall64.max(1.0),
-                "{suite}: f64 mirror must not materially beat the f32 stall"
-            );
-            // (b) The chosen fit (production `fit_window`) vs the stall:
-            // massively better on the degenerate windows, identical on the
-            // sane one.
-            let (wf, cf) = fit_window(&t32, &z32);
-            let l_chosen = smoothed_loss64(&pairs, wf as f64, cf as f64);
-            eprintln!("  audit {suite}: chosen (w={wf:.4}, c={cf:.4}) loss={l_chosen:.4}");
-            match suite {
-                "massive_intent_en" => {
-                    assert_eq!(
-                        (wf, cf),
-                        (w32, c32),
-                        "sane window: the Newton result must be kept verbatim"
-                    );
-                }
-                _ => {
-                    assert!(
-                        l_chosen < l_stall32 / 3.0,
-                        "{suite}: fallback must engage (chosen {l_chosen} vs stall {l_stall32})"
-                    );
-                }
-            }
-            // (c) The chosen fit is never worse than the trivial constant —
-            // the floor the stall violated by ~10×.
+            let (w_prod, c_prod) = solve_smoothed_mle(&t32, &z32);
+            let (w_ref, c_ref) = solve_f64_reference(&pairs);
+            let l_prod = smoothed_loss64(&pairs, w_prod as f64, c_prod as f64);
+            let l_ref = smoothed_loss64(&pairs, w_ref, c_ref);
+            // The floor: constant at the smoothed-target mean.
             let n_pos = pairs.iter().filter(|p| p.1).count() as f64;
             let rate = n_pos / pairs.len() as f64;
-            let const_loss = smoothed_loss64(&pairs, W_MIN as f64, (rate / (1.0 - rate)).ln());
+            let l_const = smoothed_loss64(&pairs, W_MIN as f64, (rate / (1.0 - rate)).ln());
+            eprintln!(
+                "  audit {suite}: prod (w={w_prod:.4}, c={c_prod:.4}) loss={l_prod:.4} | ref (w={w_ref:.4}, c={c_ref:.4}) loss={l_ref:.4} | floor={l_const:.4}"
+            );
+            // (a) The production solve reaches the reference optimum
+            // (both run the same LLW algorithm; only precision differs).
             assert!(
-                l_chosen <= const_loss + 1e-6,
-                "{suite}: chosen ({l_chosen}) must not lose to the constant floor ({const_loss})"
+                l_prod <= l_ref + 1e-3 * l_ref.max(1.0),
+                "{suite}: production loss {l_prod} must match the reference {l_ref}"
+            );
+            // (b) The reference optimum BEATS the constant floor wherever
+            // the window carries signal — the banking77/xnli bands DO
+            // (the round-1 "no z-usable signal" reading was wrong).
+            assert!(
+                l_ref < l_const,
+                "{suite}: reference optimum {l_ref} must beat the constant floor {l_const}"
+            );
+            // (c) The chosen fit (production net) never loses to the floor
+            // AND reaches the reference (the net is a no-op under the LLW
+            // solver on these windows).
+            let (wf, cf) = fit_window(&t32, &z32);
+            let l_chosen = smoothed_loss64(&pairs, wf as f64, cf as f64);
+            assert!(
+                l_chosen <= l_prod + 1e-6,
+                "{suite}: the net must keep the solver result (chosen {l_chosen} vs solve {l_prod})"
             );
         }
     }
 
-    /// The saturation-guard predicate directly (the wiring is exercised via
-    /// `refit` above; this pins the classifier on synthetic z sets):
-    /// a steep map over a narrow band collapses to few distinct values —
-    /// refused; a gentle map over the same band keeps them — kept.
+    /// The ranking-guard predicate directly (the wiring is exercised via
+    /// `refit` above; this pins the classifier on synthetic windows):
+    /// (a) an informative window whose map ties everything away — refused
+    ///     (cal AUC collapses to chance while raw carries signal);
+    /// (b) a signal-free window's constant map — ALLOWED (both AUCs at
+    ///     chance; ties destroyed nothing) — the case the distinct-count
+    ///     form of this guard wrongly refused (Issue 910);
+    /// (c) a monotone untied map over the informative window — allowed.
     #[test]
-    fn window_keeps_resolution_classifier() {
-        // 64 distinct z in a 0.05 band (the narrow-confidence class).
+    fn ranking_guard_classifies_harm_not_ties() {
+        // (a) informative narrow band: upper half positive.
         let z: Vec<f32> = (0..64).map(|i| -3.1 + 0.05 * i as f32 / 63.0).collect();
-        // Gentle map: outputs span a resolvable range.
-        assert!(window_keeps_resolution(&z, 2.0, 6.5));
-        // Saturated map at 1.0: every output exactly 1.0 in f32.
-        assert!(!window_keeps_resolution(&z, 2.0, 34.5));
-        // Fully-tied raw window: nothing to protect.
-        assert!(window_keeps_resolution(&[-3.1; 8], 2.0, 34.5));
+        let y_info: Vec<bool> = (0..64).map(|i| i >= 32).collect();
+        // Saturated-at-1.0 map: every output exactly 1.0 in f32 → cal AUC
+        // collapses to chance while raw separates perfectly (AUC 1.0).
+        assert!(!window_preserves_ranking(&z, &y_flags_from(&y_info), 2.0, 34.5));
+        // (c) gentle monotone map: AUC preserved.
+        assert!(window_preserves_ranking(&z, &y_flags_from(&y_info), 2.0, 6.5));
+        // (b) signal-free: outcomes alternate by sorted position → raw AUC
+        // exactly ½; the constant map ties everything → cal AUC ½ → allowed.
+        let y_noise: Vec<bool> = (0..64).map(|i| i % 2 == 0).collect();
+        assert!(window_preserves_ranking(&z, &y_flags_from(&y_noise), 2.0, 34.5));
+        // Single-class window: vacuous pass (AUC undefined).
+        let y_all: Vec<bool> = vec![true; 64];
+        assert!(window_preserves_ranking(&z, &y_flags_from(&y_all), 2.0, 34.5));
+    }
+
+    /// `window_preserves_ranking` takes the SMOOTHED targets as its outcome
+    /// axis; the tests express windows as bools for clarity — encode them
+    /// the way `refit` would (t_pos > 0.5 > t_neg).
+    fn y_flags_from(ys: &[bool]) -> Vec<f32> {
+        ys.iter().map(|&y| if y { 0.99 } else { 0.01 }).collect()
     }
 }
