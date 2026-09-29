@@ -29,19 +29,15 @@
 //!   snapshot.
 //!
 //! Monotonicity guard: `w > 0` is enforced (projection to `W_MIN`) —
-//! calibration must never reorder decisions, so ranking and every
-//! threshold-optimal decision are preserved by construction (G3).
-//!
-//! Output-side ranking guard (Issues 909/910 / reflex Issue 056): monotone
-//! in the reals is not monotone in the floats. A steep refit over a narrow
-//! confidence band maps the whole window into a few f32 buckets (measured:
-//! 1–3 distinct mapped values of 200–500 raw on the reflex wide-label
-//! suites) — ranking consumers tie-break to index order and the calibrated
-//! key ranks WORSE than raw. `refit` refuses any fit whose map degrades the
-//! evidence window's own AUC (ties only harm when they merge informative
-//! pairs), preserving G3's promise in f32 arithmetic, not just over the
-//! reals — while still allowing a signal-free window's honest
-//! constant-at-base-rate map (both AUCs at chance).
+//! calibration must never reorder decisions. Over the reals that also
+//! preserves ranking and every threshold-optimal decision (G3); in f32 it
+//! is carried by TWO further mechanisms (Issues 909–911): the
+//! resolution-aware `w` floor (a shipped map must resolve the window's own
+//! score gaps — distinct scores stay distinct in f32) and the
+//! zero-tolerance AUC guard (`refit` refuses any fit whose map drops the
+//! evidence window's own AUC; identity keeps the raw ordering). Out-of-
+//! window saturation is the consumer's re-measure (reflex Bench 095: 15/15
+//! suites preserved).
 //!
 //! Solver (Issue 910): the Lin–Lin–Weng 2007 form of Platt's solve —
 //! base-rate start `(0, ln((n⁺+1)/(n⁻+1)))` + Armijo-backtracked Newton.
@@ -84,17 +80,51 @@ const NEWTON_TOL: f32 = 1.0e-7;
 /// the loop then breaks at a point up to ~15× the achievable loss.
 const ARMIJO_C: f64 = 1e-4;
 const LS_MAX_HALVINGS: usize = 32;
-/// Ranking-guard floor tolerance (Issues 909/910): the refusal threshold is
-/// one standard error of the window AUC itself — `0.5/√min(n₊, n₋)`, the
-/// conservative null bound (A = ½). A monotone map's AUC drop within
-/// sampling noise is not evidence of degradation: a signal-free window's
-/// honest constant-at-base-rate map ties everything (cal AUC exactly ½)
-/// while the RAW sample AUC drifts above ½ by chance (~½ of all noise
-/// windows) — refusing those (the fixed-tolerance form of this guard)
-/// forced identity at 2.3× the floor's loss. The Platt-stall class drops
-/// the AUC by ~0.35 against an SE of ~0.08 — still refused by a wide
-/// margin.
-const RANKING_AUC_TOLERANCE: f64 = 1e-6;
+/// Ranking-guard slack (Issues 909–911): PURE float-arithmetic headroom for
+/// the rank-sum comparison — NOT a statistical tolerance. The
+/// resolution-aware `w` floor (see [`resolution_w_floor`]) makes an accepted
+/// fit's mapped window keep every distinct raw score distinct in f32, so
+/// the cal ordering IS the raw ordering and a real AUC drop cannot pass;
+/// the guard is the enforced invariant, not a filter. (The earlier SE
+/// tolerance form admitted ~0.08 AUC of tie loss at banking77's minority
+/// size — the same order as the harm the module set out to fix — and is
+/// recorded in Issue 911.)
+const RANKING_AUC_TOLERANCE: f64 = 1e-9;
+/// The ulp margin the resolution floor guarantees per minimum distinct-gap
+/// (2 ulps: one for the arithmetic, one for the rounding of `w·z+c`).
+const RESOLUTION_FLOOR_ULPS: f32 = 2.0;
+/// Cap on the resolution floor — a saturated corner the cap cannot resolve
+/// falls to the zero-tolerance guard (and from there to identity).
+const RESOLUTION_FLOOR_MAX: f32 = 1.0;
+
+/// The resolution-aware `w` floor (Issue 911): the minimum scale at which
+/// the map `sigmoid(w·z + c)` still resolves the window's own score gaps in
+/// f32 — `k·ulp(q̄) / (q̄(1−q̄)·Δz_min)`, where `q̄` is the mapped level and
+/// `Δz_min` the smallest gap between DISTINCT window logits. Below this,
+/// adjacent scores tie after mapping and every tie is pure ranking harm (a
+/// monotone map gains nothing by merging). Near-constant fits are clamped
+/// UP to the floor (the loss is flat there); steep MLEs sit far above it
+/// untouched. Returns [`W_MIN`] when the window has no distinct gaps to
+/// resolve.
+fn resolution_w_floor(z: &[f32], c: f32) -> f32 {
+    let mut sorted = z.to_vec();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.dedup();
+    if sorted.len() <= 1 {
+        return W_MIN;
+    }
+    let dz_min = sorted
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .fold(f32::INFINITY, f32::min);
+    if !dz_min.is_finite() || dz_min <= 0.0 {
+        return W_MIN;
+    }
+    let q = sigmoid(c).clamp(1e-6, 1.0 - 1e-6);
+    let ulp = (f32::from_bits(q.to_bits() + 1) - q).max(f32::MIN_POSITIVE);
+    (RESOLUTION_FLOOR_ULPS * ulp / (q * (1.0 - q) * dz_min))
+        .clamp(W_MIN, RESOLUTION_FLOOR_MAX)
+}
 /// Commitment format version (bump on any change to the canonical bytes or
 /// to the fit behavior — v2: the LLW solver fix, Issue 910; the same
 /// evidence window now produces different (correct) parameters).
@@ -172,7 +202,10 @@ impl SigmoidGateCalibrator {
     ///
     /// `p_cal = sigmoid(w · logit(p) + c)` — one logit, one fma, one
     /// sigmoid. Monotone in `p` for every reachable parameter state
-    /// (`w ≥ W_MIN > 0`), so ranking is preserved by construction.
+    /// (`w ≥ W_MIN > 0`), so the ORDER is preserved by construction; the
+    /// f32-resolution half of that guarantee (distinct scores staying
+    /// distinct) is carried by the resolution floor + the zero-tolerance
+    /// AUC guard in [`Self::refit`].
     ///
     /// Identity fast path: at the constructed parameters `(w, c) = (1, 0)`
     /// the input is returned **bit-identically** — a `logit → sigmoid`
@@ -206,22 +239,23 @@ impl SigmoidGateCalibrator {
     /// to [`W_MIN`] and `c` re-solved on the 1-D problem. The gate never
     /// inverts decisions from evidence.
     ///
-    /// Output-side ranking guard (Issues 909/910 / reflex Issue 056): a fit
+    /// Output-side ranking guard (Issues 909–911 / reflex Issue 056): a fit
     /// that DEGRADES the evidence window's own ranking quality — the mapped
     /// confidences' rank-averaged AUC against the outcomes dropping below
-    /// the raw confidences' AUC — is refused and the parameters stay
-    /// identity. Monotone in the reals but tied in the floats destroys the
-    /// ranking the monotonicity guard exists to protect exactly when the
-    /// destroyed pairs were informative; identity keeps the raw ordering
-    /// (and `apply`'s bit-identity fast path). A signal-free window's honest
-    /// constant-at-base-rate map ties everything with both AUCs at chance
-    /// and passes.
+    /// the raw confidences' AUC at all — is refused and the parameters stay
+    /// identity. The resolution floor makes an accepted fit's mapped window
+    /// keep every distinct raw score distinct in f32 (the cal ordering IS
+    /// the raw ordering), so any real drop is a defect; identity keeps the
+    /// raw ordering (and `apply`'s bit-identity fast path).
     pub fn refit(&mut self) -> bool {
         let n = self.len;
         if n < self.min_obs.max(2) {
             return false;
         }
         let (t, z) = self.smoothed_pairs();
+        // `fit_window` resolves each candidate against the resolution floor
+        // (Issue 911) before the loss-argmin, so the winner's map keeps the
+        // window's distinct scores distinct in f32.
         let (w, c) = fit_window(&t, &z);
         if (w, c) != (1.0, 0.0) && !window_preserves_ranking(&z, &t, w, c) {
             self.w = 1.0;
@@ -407,6 +441,21 @@ fn smoothed_loss(t: &[f32], z: &[f32], w: f32, c: f32) -> f64 {
     })
 }
 
+/// Apply the resolution floor to one candidate (Issue 911): below the
+/// floor, clamp `w` up and re-solve the intercept at the clamped scale
+/// (the loss is flat in `w` near constant maps, so the cost is negligible;
+/// steep candidates pass through untouched).
+fn apply_resolution_floor(t: &[f32], z: &[f32], w: f32, c: f32) -> (f32, f32) {
+    if w >= RESOLUTION_FLOOR_MAX {
+        return (w, c);
+    }
+    let floor = resolution_w_floor(z, c);
+    if w >= floor {
+        return (w, c);
+    }
+    (floor, solve_c_at_w(t, z, floor))
+}
+
 /// The refit net (Issue 909/910): the loss-argmin over three deterministic
 /// candidates, UNDER the Lin–Lin–Weng solver.
 ///
@@ -431,12 +480,14 @@ fn smoothed_loss(t: &[f32], z: &[f32], w: f32, c: f32) -> f64 {
 /// every choice; the saturation guard in [`SigmoidGateCalibrator::refit`]
 /// then enforces the f32-resolution half of the promise.
 fn fit_window(t: &[f32], z: &[f32]) -> (f32, f32) {
-    let (mut w, mut c) = solve_smoothed_mle(t, z);
+    let (w0, c0) = solve_smoothed_mle(t, z);
+    let (mut w, mut c) = apply_resolution_floor(t, z, w0, c0);
     let mut best = smoothed_loss(t, z, w, c);
     let c_const = solve_c_at_w(t, z, W_MIN);
-    let l_const = smoothed_loss(t, z, W_MIN, c_const);
+    let (w_const, c_const) = apply_resolution_floor(t, z, W_MIN, c_const);
+    let l_const = smoothed_loss(t, z, w_const, c_const);
     if l_const < best {
-        w = W_MIN;
+        w = w_const;
         c = c_const;
         best = l_const;
     }
@@ -501,11 +552,11 @@ fn window_preserves_ranking(z: &[f32], t: &[f32], w: f32, c: f32) -> bool {
     }
     let mapped: Vec<f32> = z.iter().map(|&zi| sigmoid(w.mul_add(zi, c))).collect();
     let auc_cal = auc_rank_average(&mapped, &ys);
-    // One standard error of the AUC under the conservative null (A = ½):
-    // a drop within sampling noise is not evidence of degradation.
-    let n_min = ys.iter().filter(|y| **y).count().min(ys.len() - ys.iter().filter(|y| **y).count());
-    let se = 0.5 / (n_min.max(1) as f64).sqrt();
-    auc_cal >= auc_raw - se.max(RANKING_AUC_TOLERANCE)
+    // Zero tolerance (Issue 911): with the resolution floor every accepted
+    // fit keeps distinct scores distinct, so the cal ordering IS the raw
+    // ordering — any real drop is a defect, refused. The slack is pure
+    // float arithmetic on the rank sums, never a statistical allowance.
+    auc_cal >= auc_raw - RANKING_AUC_TOLERANCE
 }
 
 /// Gradient and Hessian (loss convention: log-loss to MINIMIZE) of the
@@ -1244,8 +1295,14 @@ mod tests {
                         // The floor: constant at the smoothed-target mean.
                         let mean_t = (t.iter().map(|&ti| ti as f64).sum::<f64>()) / t.len() as f64;
                         let l_const = smoothed_loss(&t, &zvec, W_MIN, (mean_t / (1.0 - mean_t)).ln() as f32);
+                        // The floor comparison allows the resolution
+                        // floor's clamp cost (measured ≤ ~1e-5 relative on
+                        // the tightest noise cells — the loss is flat in w
+                        // near constant maps, but not infinitely so) — the
+                        // stall class this guards against sat 10× above the
+                        // floor, five orders past this bar.
                         assert!(
-                            l_fit <= l_const + 1e-6,
+                            l_fit <= l_const * (1.0 + 1e-4),
                             "band={band} base={base} n={n} signal={signal}: fit {l_fit} must not lose to the floor {l_const}"
                         );
                         // Ranking preserved on the window itself (the guard
@@ -1481,6 +1538,50 @@ mod tests {
         // Single-class window: vacuous pass (AUC undefined).
         let y_all: Vec<bool> = vec![true; 64];
         assert!(window_preserves_ranking(&z, &y_flags_from(&y_all), 2.0, 34.5));
+    }
+
+    /// The resolution floor (Issue 911) — ties stopped at their source: on a
+    /// pure-noise narrow band (where the honest fit IS near-constant and the
+    /// pre-911 distinct-count guard forced identity at 2.3× the floor's
+    /// loss), the floored fit keeps EVERY distinct raw score distinct in
+    /// f32 — the mapped distinct count equals the raw one exactly.
+    #[test]
+    fn resolution_floor_keeps_every_distinct_score() {
+        let band = 0.02f32;
+        let n = 200usize;
+        let z0 = -3.0f32;
+        let mut rng = Rng::new(0x911_0002);
+        let mut cal = SigmoidGateCalibrator::new(512, 32);
+        for i in 0..n {
+            let z = z0 + band * (i as f32 + rng.f01()) / n as f32;
+            cal.observe(sigmoid(z), rng.bernoulli(0.5));
+        }
+        assert!(cal.refit());
+        let (t, zvec) = cal.smoothed_pairs();
+        let mut sorted = zvec.clone();
+        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.dedup();
+        let mut mapped: Vec<f32> = sorted.iter().map(|&zi| cal.apply(sigmoid(zi))).collect();
+        mapped.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        mapped.dedup();
+        assert_eq!(
+            mapped.len(),
+            sorted.len(),
+            "the floored near-constant fit must keep all {} distinct scores (got {})",
+            sorted.len(),
+            mapped.len()
+        );
+        // …and the zero-tolerance guard passes it.
+        let (w, c) = cal.params_raw();
+        assert!(window_preserves_ranking(&zvec, &t, w, c));
+        // The loss stays at the floor (the clamp's cost is negligible).
+        let l_fit = smoothed_loss(&t, &zvec, w, c);
+        let mean_t = (t.iter().map(|&ti| ti as f64).sum::<f64>()) / t.len() as f64;
+        let l_const = smoothed_loss(&t, &zvec, W_MIN, (mean_t / (1.0 - mean_t)).ln() as f32);
+        assert!(
+            l_fit <= l_const + 1.0,
+            "the floored fit must stay near the constant floor ({l_fit} vs {l_const})"
+        );
     }
 
     /// `window_preserves_ranking` takes the SMOOTHED targets as its outcome
