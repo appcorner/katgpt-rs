@@ -72,6 +72,14 @@ msa_sparse = ["vortex_flow"]
 msa_per_group = ["msa_sparse"]
 msa_kv_outer = ["msa_sparse"]
 msa_adaptive_k = ["msa_sparse"]
+# PISA pyramid Top-K + LSE block selection (Plan 612, Research 595 —
+# arXiv:2609.31093): mean-pooled coarse-to-fine key pyramid + root-seeded
+# bounded expansion + LSE block scoring (mean / +½Var / exact rungs).
+# Opt-in pending the Plan 612 G2 REAL-tensor head-to-head (the MSA/HGA slot
+# discipline; the random-key NIAH harness is banned for that gate). Implies
+# dash_attn (consumes argtopk_with_scratch from block_topk) — the
+# vortex_flow sub-feature pattern.
+pyramid_topk = ["dash_attn"]
 # Chiaroscuro attention — per-token DCT spectral entropy operator routing.
 chiaroscuro = ["dep:rustfft"]
 # RAT+ Recurrence Bridge — modelless dilated inference via GDN2 state.

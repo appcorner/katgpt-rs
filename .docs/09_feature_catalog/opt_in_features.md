@@ -2306,6 +2306,7 @@ These are additional standalone features with their own plans that were not cove
 | `adaptive_cot_compaction` | 271 | Entropy-thresholded bandit-tuned online compaction |
 | `data_gate` | 111 | Task-level data gating for self-play training stability (Research 075) |
 | `vortex_flow` | — | VortexFlow attention substrate (parent of MSA family) |
+| `pyramid_topk` | 612 | PISA pyramid Top-K + LSE block selection — coarse-to-fine key pyramid, root-seeded bounded expansion, exact-LSE leaf scoring (arXiv:2609.31093); implies `dash_attn`. Opt-in — Plan 612 G2 real-tensor gate pending (MSA/HGA slot discipline) |
 
 ### Remaining smaller primitives (cross-reference)
 
