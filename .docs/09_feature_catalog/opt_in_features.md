@@ -5152,8 +5152,9 @@ The consumer is riir-ai Issue 1008.
 The third provenance member of the UQ family, beside VFD (inter-member,
 `velocity_field_disagreement`) and the DRM paper's own head (intra-model
 sampling, external): **input perturbation**. A seeded Bernoulli bucket-dropout
-over a feature bag (BLAKE3 uniform stream — `diversity::temp::
-blake3_uniform_fill`, the `[0,1)` sibling of the guided-width ε source;
+over a feature bag (BLAKE3 uniform stream — the module's own
+`blake3_uniform_fill`, the `[0,1)` 24-bit sibling of the guided-width ε
+source's hash-stream shape, kept in-module so the feature is `[]`-clean;
 survivors re-L2-normalized so cosine consumers see unchanged scale
 semantics; `p_drop == 0` a bit-identical copy, never a re-normalization)
 plus the per-question sample accumulator (`EnsembleHistogram`: pick counts +

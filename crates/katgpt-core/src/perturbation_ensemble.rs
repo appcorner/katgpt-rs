@@ -34,12 +34,15 @@
 //!
 //! # Laws (consumed from the family that preceded this module)
 //!
-//! - **Determinism**: every draw is BLAKE3-keyed (`diversity::temp::
-//!   blake3_uniform_fill` — same per-block hash stream as the guided-width ε
-//!   source). Same `(q, seed, p_drop)` ⇒ bit-identical output, every
-//!   platform, every run. Cross-seed AGGREGATE stability is a separate
-//!   assertion class owned by the consumer's harness — never conflated with
-//!   the per-seed determinism pin.
+//! - **Determinism**: every draw is BLAKE3-keyed (the [`blake3_uniform_fill`]
+//!   helper in this module — the same per-block hash-stream shape as the
+//!   guided-width ε source `diversity::temp::blake3_noise_fill`, kept HERE
+//!   so the feature stays `= []`-clean: `diversity` lives behind
+//!   `temp_loss_fingerprint`, which narrow-feature consumers do not
+//!   enable). Same `(seed, len)` ⇒ bit-identical output, every platform,
+//!   every run. Cross-seed AGGREGATE stability is a separate assertion
+//!   class owned by the consumer's harness — never conflated with the
+//!   per-seed determinism pin.
 //! - **`p_drop == 0` is bit-identical** (a plain copy — no re-normalization,
 //!   which would perturb an already-normalized vector's bits).
 //! - **Alloc-free observe (G4)**: `EnsembleHistogram` allocates at
@@ -51,8 +54,39 @@
 //!   (`instability_gate`) is a single sigmoid on the U statistic; LCB ranking
 //!   is arithmetic on moments with no normalization competition.
 
-use crate::diversity::temp::blake3_uniform_fill;
 use crate::welford::WelfordVariance;
+
+/// The uniform [0, 1) draw source — the sibling of `diversity::temp::
+/// blake3_noise_fill`'s per-block hash stream (`seed.to_le_bytes()` for
+/// block 0, `seed ‖ b` after), mapped to `[0, 1)` instead of `[-1, 1)·σ`.
+/// Kept HERE (not in `diversity::temp`) so this feature carries zero
+/// feature deps — `diversity` sits behind `temp_loss_fingerprint`, which
+/// narrow-feature consumers (riir-reflex) do not enable.
+///
+/// `(u >> 8) as f32 / 2^24` — a 24-bit uniform in `[0, 1)`, exactly
+/// representable in f32 (a full `u32 as f32 / 2^32` map would ROUND
+/// `u32::MAX` to exactly `1.0` — the 24-bit mantissa closes the top of the
+/// range; 24 bits of entropy is far beyond any threshold draw's needs).
+///
+/// Zero-allocation. Same `(seed, out.len())` ⇒ bit-identical output on
+/// every platform.
+#[inline]
+pub fn blake3_uniform_fill(seed: u64, out: &mut [f32]) {
+    for (block, chunk) in out.chunks_mut(8).enumerate() {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&seed.to_le_bytes());
+        if block > 0 {
+            hasher.update(&(block as u64).to_le_bytes());
+        }
+        let hash = hasher.finalize();
+        let bytes = hash.as_bytes();
+        for (i, slot) in chunk.iter_mut().enumerate() {
+            let o = i * 4;
+            let u = u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            *slot = ((u >> 8) as f32) / 16_777_216.0;
+        }
+    }
+}
 
 /// Bernoulli bucket-dropout perturbation of a feature vector.
 ///
