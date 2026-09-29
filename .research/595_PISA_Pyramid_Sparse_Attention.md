@@ -1,5 +1,5 @@
 # Research 595: PISA — Pyramid Sparse Attention with Log-Linear Complexity
-**Status:** Active
+**Status:** Active — Phase 1 of Plan 612 landed 2026-09-29 (commit `371b0ad64`: `pyramid_topk` primitive, 8 tests, forced-expansion bound refinement); Phase 2 gated on the Issue-908 4090 capture
 
 > **Source:** [Block Sparse Attention with Log-Linear Complexity](https://arxiv.org/abs/2609.31093) — Bohao Tang, Zhen Qin, Yuqi Pan, Zheng Li, Pengfei Liu (SJTU + ByteDance Seed), Sep 2026.
 > **Code:** none found (web search 2026-09-29 returned only the paper).
