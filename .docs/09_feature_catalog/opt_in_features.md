@@ -5146,3 +5146,32 @@ Max, AC, heavily loaded box, 5 runs, deterministic G1). The fixture is graph
 `dec_operators`), both katgpt-core. Both are **OPT-IN**, and the T9 verdict
 is no promotion. The belief-host adapter compiles with `sense_composition`.
 The consumer is riir-ai Issue 1008.
+
+## N. Perturbation Ensemble — Input-Perturbation UQ + DRM Decision Rules (reflex Plan 008 / Issue 055)
+
+The third provenance member of the UQ family, beside VFD (inter-member,
+`velocity_field_disagreement`) and the DRM paper's own head (intra-model
+sampling, external): **input perturbation**. A seeded Bernoulli bucket-dropout
+over a feature bag (BLAKE3 uniform stream — `diversity::temp::
+blake3_uniform_fill`, the `[0,1)` sibling of the guided-width ε source;
+survivors re-L2-normalized so cosine consumers see unchanged scale
+semantics; `p_drop == 0` a bit-identical copy, never a re-normalization)
+plus the per-question sample accumulator (`EnsembleHistogram`: pick counts +
+per-option `WelfordVariance` moments) and the three DRM decision-layer rules
+as pure modelless math — `u_pair = 1 − |2·p_maj − 1|` (uncertainty-aware
+rejection key), `u_bon` = runner-up share (Best-of-N flip probability), and
+LCB-λ `μ − λσ` risk-sensitive ranking (`lcb_into` / `top_by_lcb`), with
+`instability_gate` the sigmoid projection for a fused gate's third signal
+(never softmax). Distilled from arXiv:2609.33803 ("Diffusion Reward Models",
+thunlp) — the decision-layer findings only.
+
+The `WelfordVariance` accumulator moved to the ungated `welford` module in
+the same change (one definition; `karc::regime_gate` re-exports it, so
+`katgpt_core::WelfordVariance` now resolves in every configuration instead
+of only under `karc_regime_gate`).
+
+🔧 Feature flag: `perturbation_ensemble` (katgpt-core), **OPT-IN** — the
+consumer PoC (riir-reflex `mc_ensemble`, the MC wrapper over its decision
+engine) is pre-registered with a null path: marginal lift ≈ 0 over the
+two-signal fused gate at matched coverage ⇒ record the negative and stay
+opt-in (the `set_rerank` / `differential_anchor` precedent).

@@ -2444,7 +2444,9 @@ pub use karc::{
 // is re-exported here for caller ergonomics so consumers don't need to
 // reach into the `karc::regime_gate` path.
 #[cfg(feature = "karc_regime_gate")]
-pub use karc::regime_gate::{KarcRegime, KarcRegimeGate, RegimeVerdict, WelfordVariance};
+pub use karc::regime_gate::{KarcRegime, KarcRegimeGate, RegimeVerdict};
+// (`WelfordVariance` left this list for the ungated `welford` module above —
+// `katgpt_core::WelfordVariance` now resolves in EVERY configuration.)
 
 // Plan 556 Phase 2 — KARC Batched MatVec. SIMD-batched forecast across N
 // forecasters of identical (D, M, K) shape. Crowd-scale perf primitive
@@ -2916,6 +2918,19 @@ pub use velocity_field_ensemble::{
 pub mod velocity_field_disagreement;
 #[cfg(feature = "velocity_field_disagreement")]
 pub use velocity_field_disagreement::{VfdScore, VfdScratch, VfdVarianceSignal, vfd_score_into};
+
+// Welford online variance accumulator — the crate's ONE definition
+// (moved out of karc::regime_gate's feature-gated `imp`, Plan: reflex 008 /
+// Issue 055 substrate pass, 2026-09-30, so `perturbation_ensemble` and any
+// other moments consumer reaches it without the karc feature chain).
+pub mod welford;
+pub use welford::WelfordVariance;
+
+// Input-perturbation ensemble UQ — the third provenance member beside VFD
+// (inter-member) and the DRM head (intra-model, external). Opt-in (Plan:
+// reflex 008 / Issue 055).
+#[cfg(feature = "perturbation_ensemble")]
+pub mod perturbation_ensemble;
 
 // ── Phase 10 absorption (Proposal 003, 2026-07-04): modules moved from katgpt-rs/src/.
 // Always-on (no feature gate):

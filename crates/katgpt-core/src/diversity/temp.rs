@@ -210,6 +210,39 @@ pub fn blake3_noise_fill(seed: u64, sigma: f32, out: &mut [f32]) {
     }
 }
 
+/// The uniform [0, 1) sibling of [`blake3_noise_fill`] — same per-block hash
+/// stream (`seed.to_le_bytes()` for block 0, `seed ‖ b` after), same
+/// bit-reproducibility contract, but each slot maps to `[0, 1)` instead of
+/// `[-1, 1)·σ`. The Bernoulli/threshold-draw source for consumers that need
+/// keep/drop decisions rather than additive noise (the
+/// `perturbation_ensemble` bucket mask, Plan: reflex 008 / Issue 055).
+///
+/// `(u >> 8) as f32 / 2^24` — a 24-bit uniform in `[0, 1)`, exactly
+/// representable in f32 (a full `u32 as f32 / 2^32` map would ROUND
+/// `u32::MAX` to exactly `1.0` — the 24-bit mantissa closes the top of the
+/// range; 24 bits of entropy is far beyond any threshold draw's needs).
+///
+/// Zero-allocation. Same `(seed, out.len())` ⇒ bit-identical output on every
+/// platform.
+#[inline]
+pub fn blake3_uniform_fill(seed: u64, out: &mut [f32]) {
+    for (block, chunk) in out.chunks_mut(8).enumerate() {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&seed.to_le_bytes());
+        if block > 0 {
+            hasher.update(&(block as u64).to_le_bytes());
+        }
+        let hash = hasher.finalize();
+        let bytes = hash.as_bytes();
+        for (i, slot) in chunk.iter_mut().enumerate() {
+            let o = i * 4;
+            let u = u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            // Map u32 uniformly to [0, 1): 24-bit draw, exactly representable.
+            *slot = ((u >> 8) as f32) / 16_777_216.0;
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // QMC extrapolated snapshot schedule (Plan 367 Fusion C)
 // ──────────────────────────────────────────────────────────────────────────
