@@ -32,6 +32,15 @@
 //! calibration must never reorder decisions, so ranking and every
 //! threshold-optimal decision are preserved by construction (G3).
 //!
+//! Output-side saturation guard (Issue 909 / reflex Issue 056): monotone in
+//! the reals is not monotone in the floats. A steep refit over a narrow
+//! confidence band maps the whole window into a few f32 buckets (measured:
+//! 1–3 distinct mapped values of 200–500 raw on the reflex wide-label
+//! suites) — ranking consumers tie-break to index order and the calibrated
+//! key ranks WORSE than raw. `refit` refuses such a fit (parameters stay
+//! identity), preserving the G3 promise in f32 arithmetic, not just over
+//! the reals.
+//!
 //! UQ "Report the Floor" rule (Research 322 / Plan 340): a calibrated gate
 //! must still beat the dumb baselines — the constant base-rate predictor and
 //! the uncalibrated sigmoid itself — on Brier/log-loss (G2). Calibration is
@@ -55,6 +64,18 @@ pub const W_MIN: f32 = 1.0e-3;
 const NEWTON_MAX_ITERS: usize = 32;
 /// Convergence tolerance on the parameter-update norm.
 const NEWTON_TOL: f32 = 1.0e-7;
+/// Output-side saturation floor (Issue 909 / reflex Issue 056): a refit is
+/// refused (parameters stay identity) when the fitted map collapses the
+/// window's DISTINCT f32 values below this fraction of the raw window's.
+/// The `W_MIN` projection preserves order over the reals; this one preserves
+/// it in the floats — a steep fit over a narrow confidence band lands every
+/// mapped value in one f32 bucket (measured on the reflex wide-label
+/// suites: 1–3 distinct mapped values of 200–500 raw ones) and ranking
+/// consumers tie-break to index order, ranking the calibrated key WORSE
+/// than raw. The measured regimes separate by two orders of magnitude
+/// (broken ≤ 0.75% retained, sane control 100%); 0.5 admits incidental
+/// tail merges on large windows while refusing the collapse class.
+const SATURATION_DISTINCT_FRACTION: f32 = 0.5;
 /// Commitment format version (bump on any change to the canonical bytes).
 const COMMITMENT_VERSION: u8 = 1;
 
@@ -148,49 +169,39 @@ impl SigmoidGateCalibrator {
 
     /// Off-hot-path refit of `(w, c)` over the evidence window.
     ///
-    /// Deterministic 2-parameter Newton solve on the smoothed-target
-    /// logistic loss (Platt 1999): labels `t⁺ = (n⁺+1)/(n⁺+2)` /
-    /// `t⁻ = 1/(n⁻+2)` keep the problem strictly convex on separable
-    /// windows. Identity parameters below `min_obs` occupancy. Returns
-    /// `true` when the parameters moved (window big enough to fit).
+    /// Deterministic solve on the smoothed-target logistic loss (Platt
+    /// 1999): labels `t⁺ = (n⁺+1)/(n⁺+2)` / `t⁻ = 1/(n⁻+2)` keep the
+    /// problem strictly convex on separable windows. The fit is the
+    /// loss-argmin over {Newton-from-identity, near-constant base-rate,
+    /// identity} (Issue 909 — the identity-init Newton stalls in a
+    /// degenerate corner on narrow-z windows; see [`fit_window`]).
+    /// Identity parameters below `min_obs` occupancy. Returns `true` when
+    /// the window was big enough to fit (parameters may still land on
+    /// identity — refused by the saturation guard below).
     ///
-    /// Monotonicity: if the unconstrained MLE wants `w ≤ 0`, the fit is
-    /// projected — `w` pinned to [`W_MIN`] and `c` re-solved on the 1-D
-    /// problem. The gate never inverts decisions from evidence.
+    /// Monotonicity: every candidate carries `w > 0`, and if the
+    /// unconstrained MLE wants `w ≤ 0`, the fit is projected — `w` pinned
+    /// to [`W_MIN`] and `c` re-solved on the 1-D problem. The gate never
+    /// inverts decisions from evidence.
+    ///
+    /// Output-side saturation guard (Issue 909 / reflex Issue 056): a fit
+    /// whose mapped window collapses below f32 resolution — fewer distinct
+    /// mapped values than [`SATURATION_DISTINCT_FRACTION`] of the raw
+    /// window's — is refused and the parameters stay identity. Monotone in
+    /// the reals but tied in the floats destroys the ranking the
+    /// monotonicity guard exists to protect; identity keeps every distinct
+    /// value (and `apply`'s bit-identity fast path).
     pub fn refit(&mut self) -> bool {
         let n = self.len;
         if n < self.min_obs.max(2) {
             return false;
         }
         let (t, z) = self.smoothed_pairs();
-        // Newton (loss to MINIMIZE): p ← p − H⁻¹∇L; identity init.
-        let (mut w, mut c) = (1.0f32, 0.0f32);
-        for _ in 0..NEWTON_MAX_ITERS {
-            let (g0, g1, h00, h01, h11) = grad_hess(&t, &z, w, c);
-            let det = h00 * h11 - h01 * h01;
-            if !det.is_finite() || det.abs() < f32::EPSILON {
-                break;
-            }
-            let inv_det = 1.0 / det;
-            let dw = -inv_det * (h11 * g0 - h01 * g1);
-            let dc = -inv_det * (h00 * g1 - h01 * g0);
-            w += dw;
-            c += dc;
-            if !w.is_finite() || !c.is_finite() {
-                w = W_MIN;
-                c = 0.0;
-                break;
-            }
-            if dw * dw + dc * dc < NEWTON_TOL * NEWTON_TOL {
-                break;
-            }
-        }
-        // Monotonicity projection: an anti-correlated window degrades to a
-        // near-constant monotone gate rather than inverting decisions.
-        // (`is_nan` is explicit — a NaN scale must project, not skip.)
-        if w.is_nan() || w <= W_MIN {
-            w = W_MIN;
-            c = solve_c_at_w(&t, &z, w);
+        let (w, c) = fit_window(&t, &z);
+        if (w, c) != (1.0, 0.0) && !window_keeps_resolution(&z, w, c) {
+            self.w = 1.0;
+            self.c = 0.0;
+            return true;
         }
         self.w = w;
         self.c = c;
@@ -290,6 +301,114 @@ fn solve_c_at_w(t: &[f32], z: &[f32], w: f32) -> f32 {
         }
     }
     c
+}
+
+/// Deterministic 2-parameter Newton solve on the smoothed-target logistic
+/// loss (Platt 1999), including the monotonicity projection — the solver
+/// half of [`SigmoidGateCalibrator::refit`], extracted so the Issue-909
+/// audit can compare the UNGUARDED production solve against an f64 mirror
+/// on the same window. Identity init; `w > 0` on return.
+fn solve_smoothed_mle(t: &[f32], z: &[f32]) -> (f32, f32) {
+    // Newton (loss to MINIMIZE): p ← p − H⁻¹∇L; identity init.
+    let (mut w, mut c) = (1.0f32, 0.0f32);
+    for _ in 0..NEWTON_MAX_ITERS {
+        let (g0, g1, h00, h01, h11) = grad_hess(t, z, w, c);
+        let det = h00 * h11 - h01 * h01;
+        if !det.is_finite() || det.abs() < f32::EPSILON {
+            break;
+        }
+        let inv_det = 1.0 / det;
+        let dw = -inv_det * (h11 * g0 - h01 * g1);
+        let dc = -inv_det * (h00 * g1 - h01 * g0);
+        w += dw;
+        c += dc;
+        if !w.is_finite() || !c.is_finite() {
+            w = W_MIN;
+            c = 0.0;
+            break;
+        }
+        if dw * dw + dc * dc < NEWTON_TOL * NEWTON_TOL {
+            break;
+        }
+    }
+    // Monotonicity projection: an anti-correlated window degrades to a
+    // near-constant monotone gate rather than inverting decisions.
+    // (`is_nan` is explicit — a NaN scale must project, not skip.)
+    if w.is_nan() || w <= W_MIN {
+        w = W_MIN;
+        c = solve_c_at_w(t, z, w);
+    }
+    (w, c)
+}
+
+/// The smoothed logistic loss (the solver's own objective) with f64
+/// accumulation — the Issue-909 candidate-comparison evaluator. Isolates
+/// PARAMETER quality from f32 accumulation noise; deterministic.
+fn smoothed_loss(t: &[f32], z: &[f32], w: f32, c: f32) -> f64 {
+    t.iter().zip(z).fold(0.0f64, |acc, (&ti, &zi)| {
+        let q = (sigmoid(w.mul_add(zi, c)) as f64).clamp(1e-12, 1.0 - 1e-12);
+        acc - (ti as f64 * q.ln() + (1.0 - ti as f64) * (1.0 - q).ln())
+    })
+}
+
+/// The Issue-909 refit: the loss-argmin over three deterministic candidates.
+///
+/// The audit (see the tests) measured the identity-init Newton stall: on a
+/// narrow-z window the first Hessian is near-singular (det ≈ (Σr)²·var(z)),
+/// the first step lands the iterate in a saturated corner where every
+/// `r = p(1−p)` collapses and the loop breaks — at a point up to ~10× the
+/// achievable loss (reflex banking77 window: 1051 at the stall vs ~97 for a
+/// constant-at-base-rate map). An f64 mirror stalls at the SAME point — a
+/// degenerate-init defect, not an f32-precision one. The repair takes the
+/// best of:
+///
+/// 1. the Newton result (optimal on well-conditioned windows — unchanged
+///    behavior wherever the fit was already sane);
+/// 2. the near-constant base-rate candidate `(W_MIN, solve_c_at_w(W_MIN))`
+///    — the honest answer when the window carries no z-usable signal;
+/// 3. identity `(1, 0)` — keep the raw readout when even the constant map
+///    loses to it.
+///
+/// All three are monotone (`w > 0`), so G3's ranking guarantee holds for
+/// every choice; the saturation guard in [`SigmoidGateCalibrator::refit`]
+/// then enforces the f32-resolution half of the promise.
+fn fit_window(t: &[f32], z: &[f32]) -> (f32, f32) {
+    let (mut w, mut c) = solve_smoothed_mle(t, z);
+    let mut best = smoothed_loss(t, z, w, c);
+    let c_const = solve_c_at_w(t, z, W_MIN);
+    let l_const = smoothed_loss(t, z, W_MIN, c_const);
+    if l_const < best {
+        w = W_MIN;
+        c = c_const;
+        best = l_const;
+    }
+    let l_identity = smoothed_loss(t, z, 1.0, 0.0);
+    if l_identity < best {
+        w = 1.0;
+        c = 0.0;
+    }
+    (w, c)
+}
+
+/// Saturation-guard predicate (Issue 909 / reflex Issue 056): does mapping
+/// the window's logits through `sigmoid(w·z + c)` preserve at least
+/// [`SATURATION_DISTINCT_FRACTION`] of the distinct f32 values the raw
+/// window carries? Equal `z` stay equal under any map; distinct `z` can
+/// only be merged BY f32 rounding — and only when the fit saturates the
+/// sigmoid (a steep `w` over a narrow band) or flattens it past resolution.
+/// `z` must be finite (`logit_clamped` output); the raw window is skipped
+/// when it is already fully tied (`len ≤ 1` — ranking cannot degrade).
+fn window_keeps_resolution(z: &[f32], w: f32, c: f32) -> bool {
+    let mut sorted = z.to_vec();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.dedup();
+    if sorted.len() <= 1 {
+        return true;
+    }
+    let mut mapped: Vec<f32> = sorted.iter().map(|&zi| sigmoid(w.mul_add(zi, c))).collect();
+    mapped.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    mapped.dedup();
+    mapped.len() as f32 >= SATURATION_DISTINCT_FRACTION * sorted.len() as f32
 }
 
 /// Gradient and Hessian (loss convention: log-loss to MINIMIZE) of the
@@ -838,7 +957,291 @@ mod tests {
         assert_eq!(expected_calibration_error(&perfect, &y, 10), 0.0);
         // Uniform-vs-0.5 outcomes: ECE = |0.5 − ȳ| style check via bins.
         let uni = vec![0.5, 0.5, 0.5, 0.5];
-        let y2 = vec![1.0, 0.0, 1.0, 0.0];
+        let y2 = vec![0.0, 1.0, 0.0, 1.0];
         assert!((expected_calibration_error(&uni, &y2, 10) - 0.0).abs() < 1e-6);
+    }
+
+    // ── Issue 909 / reflex Issue 056: the output-side saturation guard ──
+    //
+    // The fixtures are the EXACT production cal windows the reflex engine
+    // fitted on (dumped via RIIR_DEBUG_CAL_WINDOW at the deployed posture,
+    // 2026-09-30; same pairs → same FIFO window → same params — the replay
+    // is verified against the reflex-measured temperatures below).
+
+    /// Load a dumped cal window (`<suite>.window`: `conf correct` per line).
+    fn load_window_fixture(name: &str) -> Vec<(f32, bool)> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/cal_saturation_909/"
+        );
+        let text = std::fs::read_to_string(format!("{path}{name}.window"))
+            .unwrap_or_else(|e| panic!("fixture {name}: {e}"));
+        text.lines()
+            .map(|l| {
+                let mut it = l.split_whitespace();
+                let p: f32 = it.next().unwrap().parse().unwrap();
+                let y: u8 = it.next().unwrap().parse().unwrap();
+                (p, y == 1)
+            })
+            .collect()
+    }
+
+    /// Replay a window through a fresh calibrator at the deployed config
+    /// (`cal_capacity 512, cal_min_obs 64` — reflex `EngineConfig::default`).
+    fn replay_window(pairs: &[(f32, bool)]) -> SigmoidGateCalibrator {
+        let mut cal = SigmoidGateCalibrator::new(512, 64);
+        for &(p, y) in pairs {
+            cal.observe(p, y);
+        }
+        cal.refit();
+        cal
+    }
+
+    /// The reflex-measured collapse class on the REAL windows: the
+    /// identity-init Newton stalls in the saturated corner (banking77:
+    /// (w≈1.23, c≈34.5) — ALL confs at exactly 1.0; xnli_en: (w≈5.6e5,
+    /// c≈1.4e6) — 93% of confs at 0.0), and the Issue-909 fallback replaces
+    /// it with the loss-argmin candidate — the near-constant base-rate map.
+    /// The result is monotone AND untied: the calibrated ranking key equals
+    /// the raw one (order preserved, distinct values preserved), and the
+    /// calibrated conf lands at the window's base rate (ECE-honest).
+    #[test]
+    fn degenerate_narrow_windows_get_the_loss_optimal_fallback() {
+        for (suite, base_rate_lo, base_rate_hi) in [
+            ("banking77", 0.74f32, 0.88f32),
+            ("xnli_en", 0.52f32, 0.66f32),
+        ] {
+            let pairs = load_window_fixture(suite);
+            assert!(pairs.len() >= 64, "{suite}: window must clear min_obs");
+            let cal = replay_window(&pairs);
+            let (w, c) = cal.params_raw();
+            assert_eq!(w, W_MIN, "{suite}: the constant candidate must win");
+            let c_rate = (base_rate_lo + base_rate_hi) / 2.0;
+            let expected_c = (c_rate / (1.0 - c_rate)).ln();
+            assert!(
+                ((expected_c - 0.6)..=(expected_c + 0.6)).contains(&c),
+                "{suite}: c={c} should sit near logit(base rate)={expected_c}"
+            );
+            // Monotone + untied over the window's own distinct confs: the
+            // Issue-056 harm (tie-collapse to index order) is gone.
+            let mut confs: Vec<f32> = pairs.iter().map(|p| p.0).collect();
+            confs.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            confs.dedup();
+            let mut mapped: Vec<f32> = confs.iter().map(|&p| cal.apply(p)).collect();
+            let distinct_before = mapped.len();
+            mapped.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            mapped.dedup();
+            assert!(
+                mapped.len() as f32 >= 0.5 * distinct_before as f32,
+                "{suite}: guard must pass the fallback fit ({} distinct of {})",
+                mapped.len(),
+                distinct_before
+            );
+            let mut prev = f32::MIN;
+            for &p in &confs {
+                let q = cal.apply(p);
+                assert!(q >= prev, "{suite}: apply must be non-decreasing");
+                prev = q;
+            }
+        }
+    }
+
+    /// The sane control on the real data: massive_intent_en's Newton fit
+    /// (measured T=0.275 — band wide enough that the fit keeps f32
+    /// resolution and the loss beats any constant). The fallback must keep
+    /// it and the guard must not fire.
+    #[test]
+    fn fallback_keeps_the_sane_massive_fit() {
+        let pairs = load_window_fixture("massive_intent_en");
+        let cal = replay_window(&pairs);
+        let (w, c) = cal.params_raw();
+        assert!((w, c) != (1.0, 0.0), "the sane fit must survive");
+        assert!((3.5..3.8).contains(&w), "the Newton result must win (measured w≈3.63)");
+        let (t, _b) = cal.params();
+        assert!((0.1..=1.0).contains(&t), "measured T≈0.275, got {t}");
+    }
+
+    // ── Issue 909 repair 3: the Newton early-break audit ──
+
+    fn sigmoid64(x: f64) -> f64 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    fn logit64(p: f64) -> f64 {
+        let p = p.clamp(P_CLIP as f64, 1.0 - P_CLIP as f64);
+        (p / (1.0 - p)).ln()
+    }
+
+    /// f64-mirrored Platt targets + logits for a window.
+    fn smoothed_pairs64(pairs: &[(f32, bool)]) -> (Vec<f64>, Vec<f64>) {
+        let n = pairs.len();
+        let n_pos = pairs.iter().filter(|p| p.1).count() as f64;
+        let n_neg = n as f64 - n_pos;
+        let t_pos = (n_pos + 1.0) / (n_pos + 2.0);
+        let t_neg = 1.0 / (n_neg + 2.0);
+        pairs
+            .iter()
+            .map(|&(p, y)| {
+                let t = if y { t_pos } else { t_neg };
+                (t, logit64(p as f64))
+            })
+            .unzip()
+    }
+
+    /// The smoothed logistic loss in f64 at arbitrary parameters — the
+    /// audit's objective (isolates parameter quality from f32 accumulation).
+    fn smoothed_loss64(pairs: &[(f32, bool)], w: f64, c: f64) -> f64 {
+        let (ts, zs) = smoothed_pairs64(pairs);
+        ts.iter()
+            .zip(&zs)
+            .map(|(&t, &z)| {
+                let q = sigmoid64(w.mul_add(z, c)).clamp(1e-12, 1.0 - 1e-12);
+                -(t * q.ln() + (1.0 - t) * (1.0 - q).ln())
+            })
+            .sum()
+    }
+
+    /// f64 mirror of the production solve (`solve_smoothed_mle` structure
+    /// verbatim: identity init, 32 iterations, det early-break, step-norm
+    /// tolerance, non-finite guard, W_MIN projection with the 1-D c re-solve).
+    fn solve_f64_mirror(pairs: &[(f32, bool)]) -> (f64, f64) {
+        let (t, z) = smoothed_pairs64(pairs);
+        let grad_hess64 = |w: f64, c: f64| {
+            t.iter().zip(&z).fold(
+                (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64),
+                |(g0, g1, h00, h01, h11), (&ti, &zi)| {
+                    let p = sigmoid64(w.mul_add(zi, c));
+                    let d = p - ti;
+                    let r = p * (1.0 - p);
+                    (g0 + d * zi, g1 + d, h00 + r * zi * zi, h01 + r * zi, h11 + r)
+                },
+            )
+        };
+        let solve_c_at_w64 = |w: f64| -> f64 {
+            let mut c = 0.0f64;
+            for _ in 0..NEWTON_MAX_ITERS {
+                let (g, h) = t.iter().zip(&z).fold((0.0f64, 0.0f64), |(g, h), (&ti, &zi)| {
+                    let p = sigmoid64(w.mul_add(zi, c));
+                    (g + p - ti, h + p * (1.0 - p))
+                });
+                if h < f64::EPSILON {
+                    break;
+                }
+                let dc = -g / h;
+                c += dc;
+                if !c.is_finite() {
+                    return 0.0;
+                }
+                if dc * dc < (NEWTON_TOL as f64) * (NEWTON_TOL as f64) {
+                    break;
+                }
+            }
+            c
+        };
+        let (mut w, mut c) = (1.0f64, 0.0f64);
+        for _ in 0..NEWTON_MAX_ITERS {
+            let (g0, g1, h00, h01, h11) = grad_hess64(w, c);
+            let det = h00 * h11 - h01 * h01;
+            if !det.is_finite() || det.abs() < f64::EPSILON {
+                break;
+            }
+            let inv_det = 1.0 / det;
+            let dw = -inv_det * (h11 * g0 - h01 * g1);
+            let dc = -inv_det * (h00 * g1 - h01 * g0);
+            w += dw;
+            c += dc;
+            if !w.is_finite() || !c.is_finite() {
+                w = W_MIN as f64;
+                c = 0.0;
+                break;
+            }
+            if dw * dw + dc * dc < (NEWTON_TOL as f64) * (NEWTON_TOL as f64) {
+                break;
+            }
+        }
+        if w.is_nan() || w <= W_MIN as f64 {
+            w = W_MIN as f64;
+            c = solve_c_at_w64(w);
+        }
+        (w, c)
+    }
+
+    /// The audit: on the REAL windows, is the production f32 solve's iterate
+    /// a (near-)optimal point of the smoothed loss — or a suboptimal stall?
+    /// The measured verdict (pinned below): the f32 loop and an f64 mirror
+    /// stall at the SAME extreme point (gap ≈ 0 — NOT an f32-precision
+    /// defect), that point is up to ~10× the loss of a constant-at-base-
+    /// rate map (the degenerate-init stall, not the smoothed MLE), and the
+    /// Issue-909 `fit_window` fallback takes over exactly there.
+    #[test]
+    fn newton_stall_audit_on_real_windows() {
+        for suite in ["banking77", "xnli_en", "massive_intent_en"] {
+            let pairs = load_window_fixture(suite);
+            let mut cal = SigmoidGateCalibrator::new(512, 64);
+            for &(p, y) in &pairs {
+                cal.observe(p, y);
+            }
+            let (t32, z32) = cal.smoothed_pairs();
+            let (w32, c32) = solve_smoothed_mle(&t32, &z32);
+            let (w64, c64) = solve_f64_mirror(&pairs);
+            let l_stall32 = smoothed_loss64(&pairs, w32 as f64, c32 as f64);
+            let l_stall64 = smoothed_loss64(&pairs, w64, c64);
+            eprintln!(
+                "  audit {suite}: stall f32 (w={w32:.4}, c={c32:.4}) loss={l_stall32:.4} | f64 (w={w64:.4}, c={c64:.4}) loss={l_stall64:.4} | gap={:.4}",
+                l_stall32 - l_stall64
+            );
+            // (a) NOT an f32-precision defect: the mirror stalls at the same
+            // point (within float-noise) with the same loss.
+            assert!(
+                l_stall32 - l_stall64 < 1e-3 * l_stall64.max(1.0),
+                "{suite}: f64 mirror must not materially beat the f32 stall"
+            );
+            // (b) The chosen fit (production `fit_window`) vs the stall:
+            // massively better on the degenerate windows, identical on the
+            // sane one.
+            let (wf, cf) = fit_window(&t32, &z32);
+            let l_chosen = smoothed_loss64(&pairs, wf as f64, cf as f64);
+            eprintln!("  audit {suite}: chosen (w={wf:.4}, c={cf:.4}) loss={l_chosen:.4}");
+            match suite {
+                "massive_intent_en" => {
+                    assert_eq!(
+                        (wf, cf),
+                        (w32, c32),
+                        "sane window: the Newton result must be kept verbatim"
+                    );
+                }
+                _ => {
+                    assert!(
+                        l_chosen < l_stall32 / 3.0,
+                        "{suite}: fallback must engage (chosen {l_chosen} vs stall {l_stall32})"
+                    );
+                }
+            }
+            // (c) The chosen fit is never worse than the trivial constant —
+            // the floor the stall violated by ~10×.
+            let n_pos = pairs.iter().filter(|p| p.1).count() as f64;
+            let rate = n_pos / pairs.len() as f64;
+            let const_loss = smoothed_loss64(&pairs, W_MIN as f64, (rate / (1.0 - rate)).ln());
+            assert!(
+                l_chosen <= const_loss + 1e-6,
+                "{suite}: chosen ({l_chosen}) must not lose to the constant floor ({const_loss})"
+            );
+        }
+    }
+
+    /// The saturation-guard predicate directly (the wiring is exercised via
+    /// `refit` above; this pins the classifier on synthetic z sets):
+    /// a steep map over a narrow band collapses to few distinct values —
+    /// refused; a gentle map over the same band keeps them — kept.
+    #[test]
+    fn window_keeps_resolution_classifier() {
+        // 64 distinct z in a 0.05 band (the narrow-confidence class).
+        let z: Vec<f32> = (0..64).map(|i| -3.1 + 0.05 * i as f32 / 63.0).collect();
+        // Gentle map: outputs span a resolvable range.
+        assert!(window_keeps_resolution(&z, 2.0, 6.5));
+        // Saturated map at 1.0: every output exactly 1.0 in f32.
+        assert!(!window_keeps_resolution(&z, 2.0, 34.5));
+        // Fully-tied raw window: nothing to protect.
+        assert!(window_keeps_resolution(&[-3.1; 8], 2.0, 34.5));
     }
 }
