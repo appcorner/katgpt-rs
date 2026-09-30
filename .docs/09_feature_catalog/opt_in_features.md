@@ -5186,3 +5186,50 @@ consumer PoC (riir-reflex `mc_ensemble`, the MC wrapper over its decision
 engine) is pre-registered with a null path: marginal lift ≈ 0 over the
 two-signal fused gate at matched coverage ⇒ record the negative and stay
 opt-in (the `set_rerank` / `differential_anchor` precedent).
+
+## 138. Dirichlet-Distribution Primitives — Exact Explore Dial + Thinning + Belief Memory (Issue 912 T2+T3 / Research 596)
+
+Three exact-law operators over the simplex, distilled from arXiv:2609.35553
+("Simplex Diffusion Models" — the propositions are classical; the paper
+disclaims originality on the thinning math). **Log-space throughout**: every
+Gamma variate is sampled by its logarithm (the small-α boost is `ln(U)/α`,
+exact where the linear-space `U^{1/α}` in `data_probe/markov.rs` underflows
+for α ≲ 0.02) and normalization is log-sum-exp — grid case C pins the
+α_min = 0.01 regime the linear sampler cannot reach.
+
+- **`sample_conc_into(p, c, seed, out)`** — the exact explore dial
+  `Y ~ Dir(c·p)`: `E[Y] = p` **exactly by construction**,
+  `Var[Y_i] = p_i(1−p_i)/(c+1)`, `Cov = −p_i·p_j/(c+1)`. G1 mean/var/cov
+  closed-form pins at three grid cases (α_min = 4 / 0.1 / **0.01**);
+  G2 **183 ns/call** at N=8 (bar 1 µs, release best-of-5); G4 alloc-free.
+- **`thinning_into(x, alpha, rho, seed, out)`** — the Prop A.2 transition:
+  `B_i ~ Beta(ρα_i, (1−ρ)α_i)` multiplicative reweighting ⇒ `Y ~ Dir(ρα)`
+  under Dirichlet input (variance ratio `(c+1)/(ρc+1)` pinned; ρ=1 bitwise
+  identity, no rng consumed). NOT mean-preserving on fixed vectors — the
+  Jensen bias is PINNED (`p=(0.9,0.07,0.03)`, `c=2`, `ρ=0.5` ⇒
+  `E[Y_0] ≈ 0.847 ≠ 0.9`, the paper's simulated value). The `alpha`
+  parameter is load-bearing (the B shapes depend on it) — the issue's
+  one-line signature omitted it.
+- **`DirichletEma<const M, const K>`** — belief memory over the last M
+  one-hots: recursive mean path `h ← β·h + (1−β)·onehot` at a FROZEN op
+  order (bit-identical to a plain EMA — the ε=∞ routing), and a drawn path
+  `L ~ Dir(ε·shares)` (M Gammas on decision events, aggregated class-wise —
+  exact `Dir(ε·s)` by the Dirichlet aggregation identity). `E[L] = shares`
+  ε-independent; `Var[L_j] = share_j(1−share_j)/(C+1)` with
+  `C = ε(1−β^M)` the truncated raw mass. The ring truncation is NAMED:
+  the drawn expectation is the ring closed form, deliberately NOT `h`
+  (which retains the infinite tail) — pinned as a divergence.
+
+En-route finding: the first thinning draft computed the two-term LSE with
+the MAX's own shift inside `ln_1p` — `lse = lg_a + ln 2` whenever
+`lg_a > lg_b`, forcing `B = 1/2` for half the draws (bimodal, Beta-
+incorrect). The closed-form pins caught it in the first red run (variance
+ratio 1.445 vs 1.8; Jensen bias 0.889 vs 0.847). Fix: `ln_1p` takes the
+MIN's shift; the OTHER term after a max shift is exactly 1.
+
+🔧 Feature flag: `dirichlet_dist` (katgpt-core), **OPT-IN** — no default-on
+claim; consumers unscheduled (T4 notes in the module docs:
+`perturbation_ensemble` interface-swap arm, `katgpt-sense`
+`evolve_belief_additive` sibling, riir-neuron-db consolidation merge,
+`bom_arena` hypothesis sampler). No coverage/prediction-interval claim →
+the conformal-naive floor does not bind these primitives.

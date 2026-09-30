@@ -3495,6 +3495,15 @@ pub mod sigmoid_calibration;
 #[cfg(feature = "distance_abstain")]
 pub mod distance_abstain;
 
+/// Dirichlet-distribution primitives (Issue 912 T2+T3 / Research 596) — the
+/// exact explore dial `Dir(c·p)` (mean exact by construction, log-space
+/// sampling so α ≲ 0.02 stays exact), the thinning transition (exact ONLY
+/// under Dirichlet input — NOT mean-preserving on fixed vectors), and the
+/// Dirichlet-EMA belief memory (recursive mean path + randomized drawn path
+/// with the ring-truncation named). Opt-in (`dirichlet_dist`).
+#[cfg(feature = "dirichlet_dist")]
+pub mod dirichlet_dist;
+
 /// Fitted anchor tables — the SHARED streaming table-builder substrate
 /// (Issues 882+883 P0 / Research 586+587, the F1 fusion: one calibration
 /// pass, two consumers). Per-key streaming mean rows (they ARE the table
