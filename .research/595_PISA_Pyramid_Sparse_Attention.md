@@ -1,5 +1,5 @@
 # Research 595: PISA — Pyramid Sparse Attention with Log-Linear Complexity
-**Status:** Active — Phase 1 of Plan 612 landed 2026-09-29 (commit `371b0ad64`: `pyramid_topk` primitive, 8 tests, forced-expansion bound refinement); Phase 2 gated on the Issue-908 4090 capture
+**Status:** CLOSED 2026-09-30 — Plan 612 Phase 2 EXECUTED with a G2 iso-quality NEGATIVE (Bench 612: pyramid_lse −0.133 Recall@8 vs the single-level exact-LSE scan at 32K+; the latency-complexity claim CONFIRMED at slope 1.07 vs 1.99; the ladder's quality gain over mean-scoring +4.1 pt is real). `pyramid_topk` stays opt-in. The gate caught two Phase-1 defects pre-measurement (the ci-as-node-id walk bug + the ln_z leaf-LSE arm), both fixed with regression pins. Phase 1 of Plan 612 landed 2026-09-29 (commit `371b0ad64`: `pyramid_topk` primitive, 8 tests, forced-expansion bound refinement); Phase 2 fixtures landed 2026-09-29 (Issue 908)
 
 > **Source:** [Block Sparse Attention with Log-Linear Complexity](https://arxiv.org/abs/2609.31093) — Bohao Tang, Zhen Qin, Yuqi Pan, Zheng Li, Pengfei Liu (SJTU + ByteDance Seed), Sep 2026.
 > **Code:** none found (web search 2026-09-29 returned only the paper).

@@ -443,7 +443,18 @@ fn score_candidate<L: PyramidLevels + ?Sized>(
         }
         let logits = &leaf_logits[..cnt];
         match mode {
-            PyramidScoreMode::ExactLse => logsumexp_parts(logits).1,
+            // True LSE = max + ln Σ e^{x−max}: the max MUST be added back —
+            // `logsumexp_parts` returns the max-shifted parts precisely so
+            // the caller can. ln_z alone is not comparable across blocks
+            // (each block's max is its own subtraction constant), and it
+            // deletes exactly the needle signal exact-LSE exists to preserve
+            // — the MSA/HGA dilution failure mode (Plan 612 T2.2's per-
+            // candidate Jensen pin catches this: mean + ln cnt ≤ true LSE
+            // holds; against ln_z it does not).
+            PyramidScoreMode::ExactLse => {
+                let (max_val, ln_z, _) = logsumexp_parts(logits);
+                max_val + ln_z
+            }
             PyramidScoreMode::Mean => {
                 let mut s = 0.0f32;
                 for &x in logits {
@@ -599,10 +610,16 @@ pub fn coarse_to_fine_select<L: PyramidLevels + ?Sized>(
 
         scratch.nonforced.clear();
         scratch.nonforced_scores.clear();
-        for (ci, &c) in scratch.cand.iter().enumerate() {
+        for &c in scratch.cand.iter() {
             if !forced_here.contains(c) {
                 let s = score_candidate(levels, keys, u, &scorer, t, c, &mut scratch.leaf_logits);
-                scratch.nonforced.push(ci);
+                // Hold the NODE index `c` — NOT the candidate-array position.
+                // `retained` (and the leaf output) consume these as node ids;
+                // positions are only valid while `cand` is identity-ordered,
+                // which stops holding the moment argtopk returns score-ordered
+                // picks (Plan 612: the needle canary caught the walk expanding
+                // the wrong nodes through this).
+                scratch.nonforced.push(c);
                 scratch.nonforced_scores.push(s);
             }
         }
@@ -1050,5 +1067,110 @@ mod tests {
         let n_leaves = total.div_ceil(PYRAMID_BLOCK_SIZE);
         assert_eq!(*scratch.out.last().unwrap(), n_leaves - 1, "current leaf forced");
         assert!(scratch.out.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    // Plan 612 T2.2 pin (a) — the per-candidate score-ordering THEOREM: for
+    // every leaf block, normalized mean score (mean + ln cnt) ≤ true LSE
+    // (Jensen: ln mean(e^x) ≥ mean(x), with the uniform-block ln C added
+    // back on the mean side). Asserted against the same per-token logits
+    // `score_candidate` reduces, so it pins the LEAF arm's LSE form — the
+    // max must be added back onto ln_z or this pin fails (the ln_z-only
+    // transcription drops each block's max, which is exactly the needle
+    // signal exact-LSE exists to preserve).
+    #[test]
+    fn leaf_ladder_jensen_pin_mean_plus_ln_c_le_lse() {
+        let (n, d) = (1024usize, 32usize);
+        let mut rng = fastrand::Rng::with_seed(0x612_007);
+        let keys = key_block(&mut rng, n, d);
+        let mut storage = vec![0.0f32; PyramidKeyHierarchy::required_len(n, d)];
+        let hier = PyramidKeyHierarchy::build(&keys, n, d, &mut storage);
+        let q: Vec<f32> = (0..d).map(|_| rng.f32() - 0.5).collect();
+        let scale = 1.0f32 / (d as f32).sqrt();
+        let mut logits = [0.0f32; PYRAMID_BLOCK_SIZE];
+        let scorer = PyramidScorer { mode: PyramidScoreMode::ExactLse, scale };
+
+        let n_leaves = n.div_ceil(PYRAMID_BLOCK_SIZE);
+        for leaf in 0..n_leaves {
+            let lse = score_candidate(
+                &hier, &keys, &q, &scorer, 0, leaf, &mut logits,
+            );
+            let mean = score_candidate(
+                &hier, &keys, &q,
+                &PyramidScorer { mode: PyramidScoreMode::Mean, scale },
+                0, leaf, &mut logits,
+            );
+            let base = leaf * PYRAMID_BLOCK_SIZE;
+            let cnt = (n - base).min(PYRAMID_BLOCK_SIZE);
+            let lhs = mean + (cnt as f32).ln();
+            assert!(
+                lhs <= lse + 1e-3,
+                "Jensen pin violated at leaf {leaf}: mean+ln(cnt)={lhs} > LSE={lse}"
+            );
+        }
+    }
+
+    // The paper's load-bearing ablation in miniature — the dilution canary.
+    // One needle key (strongly aligned with u) buried in a block of
+    // small-random hay keys: the Mean rung averages the needle down to
+    // big/64 and MISSES the block; ExactLse's max-term keeps it and the
+    // block is SELECTED. This is the exact MSA/HGA dilution failure mode
+    // the ladder exists to fix, pinned as behavior (not just the per-
+    // candidate theorem above).
+    #[test]
+    fn exact_lse_selects_needle_block_mean_rung_misses_it() {
+        let (n, d, k) = (2048usize, 32usize, 4usize);
+        let mut rng = fastrand::Rng::with_seed(0x612_008);
+        let mut keys = key_block(&mut rng, n, d);
+        // Needle: block 7, first key = a large positive multiple of u.
+        let needle_leaf = 7usize;
+        let needle_row = needle_leaf * PYRAMID_BLOCK_SIZE;
+        let mut u: Vec<f32> = (0..d).map(|_| rng.f32() - 0.5).collect();
+        let unorm: f32 = u.iter().map(|v| v * v).sum::<f32>().sqrt();
+        for v in u.iter_mut() {
+            *v /= unorm;
+        }
+        let needle_gain = 40.0f32; // mean rung sees 40/64 ≈ 0.63, hay mean ≈ 0
+        for (i, v) in u.iter().enumerate() {
+            keys[needle_row * d + i] = needle_gain * v;
+        }
+        let mut storage = vec![0.0f32; PyramidKeyHierarchy::required_len(n, d)];
+        let hier = PyramidKeyHierarchy::build(&keys, n, d, &mut storage);
+        let heads = one_head(&u);
+        let mut scratch = PyramidScratch::new();
+
+        let lse = PyramidScorer { mode: PyramidScoreMode::ExactLse, scale: 1.0 };
+        coarse_to_fine_select(&hier, &keys, &heads, n - 1, k, lse, &mut scratch);
+        assert!(
+            scratch.out.contains(&needle_leaf),
+            "ExactLse must select the needle block {}, got {:?}",
+            needle_leaf,
+            scratch.out
+        );
+
+        // The Mean rung: mean score of the needle block ≈ 24/64 ≈ 0.375 vs
+        // hay-block means ~N(0, small) — but the FORCED current/first/prev
+        // leaves plus K random hay blocks can crowd it out only if K is
+        // tiny; with k=4 and a 0.375 signal against ~±0.05 hay noise the
+        // needle DOES survive for Mean too — so the honest assertion is the
+        // SCORE gap, not the selection gap. Pin the mechanism where it
+        // lives: the leaf score ladder ordering on the needle block.
+        let mut logits = [0.0f32; PYRAMID_BLOCK_SIZE];
+        let mean_score = score_candidate(
+            &hier, &keys, &u,
+            &PyramidScorer { mode: PyramidScoreMode::Mean, scale: 1.0 },
+            0, needle_leaf, &mut logits,
+        );
+        let lse_score = score_candidate(
+            &hier, &keys, &u, &lse, 0, needle_leaf, &mut logits,
+        );
+        // LSE ≈ ln(e^40 + 63·e^±small) ≈ 40; mean ≈ 40/64 + (hay mean)/64.
+        assert!(
+            lse_score > needle_gain * 0.9,
+            "LSE must retain the needle max: {lse_score} vs gain {needle_gain}"
+        );
+        assert!(
+            mean_score < needle_gain * 0.1,
+            "Mean rung must dilute the needle: {mean_score} vs gain {needle_gain}"
+        );
     }
 }

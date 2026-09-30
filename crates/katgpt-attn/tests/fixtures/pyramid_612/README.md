@@ -29,7 +29,8 @@ layers' Q, prompt.txt, tokens.u32 — ~1.2 GB) live in gitignored storage, not
 in this repo: `/Volumes/SDXC1TB/pyramid_612/` (M3) and
 `E:/git/_sync/pycap/` (4090), digest-pinned by the same manifest. The T2.2
 gate loads committed bins relative to `CARGO_MANIFEST_DIR` and the full set
-via an env path verified against the manifest's BLAKE3s — skip-loud when
+via `PYRAMID_612_FULL_DIR` (point it at the `full/` directory; every file is
+BLAKE3-verified against the manifest before use) — skip-loud when
 absent, never a green zero.
 
 **The PRIMARY model (Ternary-Bonsai-2-27B PQ2_0) is a documented blocker**:
