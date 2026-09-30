@@ -83,3 +83,5 @@ This stays in riir-ai domain (Research 016) as it's about game LoRA training con
 
 **Date:** 2026-05-27
 **Status:** Research only — no plan, no feature gate, no code change
+
+> **PASS-Redirects (synthesis):** Wang, Kevrekidis & Belkin [arXiv:2609.07755 "A Theoretical Analysis of Generalization Dynamics in Neural Networks under Gradient Descent with Weight Decay"] — the dynamical-mechanism companion to this note's static WD=Solomonoff claim, scoped to FULL-WEIGHT GD+WD training: weight decay does not merely select low-K solutions as a prior, it actively contracts the learned function's within-cell prediction variation at per-step rate 2(Σ_{r≤ℓ} s_r + ℓ+2)·ηλ toward an approximate-homogeneity floor 2C(ℓ+2)ε_ah (the Euler residual of the network blocks; inner weights carry the error, outer linear weights are exact) — generalization IS that smoothing, and it is slow (grokking = its delay behind interpolation, t ~ log(V₀/ε)/(2ℓηλ)). Scope note: the contraction law does NOT transfer to LoRA-over-frozen-base lanes (WD there pulls the adapter delta toward the base function, not the network's PV) — lane arithmetic in the riir-train 016 redirect.
