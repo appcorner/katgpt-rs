@@ -63,6 +63,15 @@ fn sample_gamma(alpha: f32, rng: &mut fastrand::Rng) -> f32 {
 /// normalizes — the general construction the docstring always promised.
 ///
 /// `buf.len()` must equal `k`. Reuses the buffer to avoid per-call allocation.
+///
+/// **Small-α limit (f32)**: `sample_gamma` computes `U^{1/α}` in linear f32
+/// space — for α ≲ 0.02 that exponent underflows to subnormal/zero on a large
+/// fraction of draws, and a row whose every coordinate underflows falls back
+/// to the uniform branch (the OPPOSITE of peaked). In-repo callers (α = 1.0,
+/// 0.1, 0.05) are unaffected (all-underflow ≈ 1e-8 at α=0.05, K=4). The
+/// general sampler (Issue 912 T2 `dirichlet_dist`) must draw in LOG space
+/// (log-Gamma + log-sum-exp normalization) — its G1 grid starts at α=0.01,
+/// exactly where this limit bites.
 fn sample_dirichlet_into(k: usize, alpha: f32, rng: &mut fastrand::Rng, buf: &mut [f32]) {
     debug_assert_eq!(buf.len(), k);
     let mut sum = 0.0f32;
