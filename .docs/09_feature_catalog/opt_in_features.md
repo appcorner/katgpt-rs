@@ -4028,6 +4028,16 @@ Platt-smoothed targets, bit-identical under replay.
 - **G4**: observe+apply zero-alloc (1000-call loop, 0 allocations; runs in
   dev AND `--release --features alloc_tracking` per the Issue-741
   predicate).
+- **Solver repairs (Issues 909/910/911, 2026-09-30 — the reflex
+  Issue-056 root cause)**: real narrow windows hit Platt's undamped
+  identity-init Newton stall (10.8×/23× above the achievable loss) and
+  f32 tie-collapse on saturated fits (1–3 distinct values of 200–500) —
+  the solve is now the Lin–Lin–Weng 2007 form (base-rate start + Armijo
+  backtracking) with a three-candidate loss-argmin fallback, a
+  resolution-aware `w` floor, and a zero-tolerance AUC guard (ties
+  stopped at their source; distinct scores stay distinct in f32). Real
+  cal windows are committed replay fixtures — replay reproduces the
+  measured reflex fits exactly.
 
 Consumers (riir-ai Issue 964, in order): **CLR verifier — LANDED as
 `clr_calibration` (§114, Bench 807)**; **ActionBridge — LANDED as
