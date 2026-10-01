@@ -1,3 +1,26 @@
+## Issue 913 (2026-10-01) — Grouped-evidence noise-weighting primitives (riir-train Research 463, EasyPPO modelless half): CLOSED (T1–T4 landed opt-in; file removed per noise-reduction)
+
+Source riir-train Research 463 ← arXiv:2609.36802 EasyPPO, GOAT-tier Gain. All
+four primitives in `crates/katgpt-core/src/grouped_evidence.rs` behind
+`grouped_evidence_weighting` (default-off, implies `best_belief` + `rating`),
+landed `9ad5e21ce`, record Bench 905. Consumers unscheduled — riir-clippy
+Issue 139 tracks the healer consumer and is unblocked by this landing.
+
+- T1 `variance_floor` (Popoviciu `Δ/(2√n)`), T2 `filter_bias_bound`
+  (`2Γ·P(¬C)`) — both tight at their two-point extremals, pinned.
+- T3 `best_belief_score_weighted` — fractional-count Beta LCB through the
+  shared solver (`beta_quantile_cf` extracted; integer path bit-unchanged);
+  `ExogenousSigma` carries provenance, no plug-in constructor. Best-arm
+  identification 0.685 vs 0.617, paired LB95 +0.057; plug-in σ̂ negative
+  control −0.042 bias toward the extreme. **Coverage measured 0.883 at
+  nominal 0.95 under overdispersion → shipped as a ranking score, no UQ
+  claim** (the conformal floor binds any consumer that claims coverage).
+- T4 `noise_scaled_k` + noise-scaled `update_scored` / `update_f32` —
+  bit-identical at the floor; MSE 161 vs 1668 at equal mean step; plug-in
+  σ̂ inflates the asymptote 200 → 332.
+- Kill clock (from the issue): no consumer within 30 days of `9ad5e21ce`
+  (i.e. by 2026-10-31) ⇒ goat-audit stall class — demote or remove.
+
 ## Issue 912 (2026-10-01) — Dirichlet-distribution primitives: sampler repair + exact explore-dial sampling + Dirichlet-EMA (Research 596): CLOSED (T1–T5 landed opt-in; file removed per noise-reduction)
 
 Source Research 596 / arXiv:2609.35553 Simplex Diffusion Models, Tier Gain. All

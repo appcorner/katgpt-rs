@@ -1,9 +1,9 @@
 # Bench 905 — Grouped-Evidence Noise-Weighting GOAT (Issue 913 T1–T4, riir-train Research 463)
 
-**Status:** RECORD — T1–T4 landed, GOAT G1–G4 executed, opt-in (no default-on claim; consumers unscheduled)
+**Status:** RECORD — T1–T4 landed (`9ad5e21ce`), GOAT G1–G4 executed, opt-in (no default-on claim; consumers unscheduled)
 
 Source: riir-train Research 463 (`463_EasyPPO_Critic_Stabilization.md`) ← arXiv:2609.36802
-("EasyPPO"); issue: `.issues/913_grouped_evidence_noise_weighting.md`. Module:
+("EasyPPO"); issue: Issue 913 (closed; record in HISTORY.md). Module:
 `crates/katgpt-core/src/grouped_evidence.rs`, feature `grouped_evidence_weighting` (default-off,
 implies `best_belief` + `rating`). Substrate consumed, not rebuilt: the `best_belief` Newton/Lentz
 Beta-quantile solver (extracted as `beta_quantile_cf` for fractional shapes — the integer path
