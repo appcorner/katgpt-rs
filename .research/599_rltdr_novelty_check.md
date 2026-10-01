@@ -1,10 +1,12 @@
-# Research 4XX: RLTL;DR (arXiv:2609.37633) — Novelty Check Against Published Prior Art
+# Research 599: RLTL;DR (arXiv:2609.37633) — Novelty Check Against Published Prior Art
 
 **Status:** RECORD (web-search novelty sweep complete, 2026-10-01)
 
 **Candidate paper:** RLTL;DR: Self-improvement by Internalizing Self-generated Feedback (Apple, Sep 2026, arXiv:2609.37633). LLM agent RL where failed attempts + verifier outputs → self-generated one-sentence "insight" → conditions next rollout → SFT loss on insight tokens internalizes the task→insight mapping; reduced form trains ONLY on (task, insight) tuples (no rollouts needed).
 
 **Method note:** Web-search-only sweep (web_search_prime); several queries timed out or returned noise; timeouts retried with re-phrasings. Absence below = "not found via search", never "does not exist".
+
+**Addendum (2026-10-01, verdict-review round 1):** targeted second pass on claim 7 found the near-miss the sweep missed — **Generative Agents (Park et al., arXiv:2304.03442)**: the reflection mechanism (episodic stream → synthesized higher-level ideas → recency+relevance+importance retrieval, in a simulated agent town) IS episode→generic consolidation + similarity retrieval for simulated agents. Claim 7's mechanism novelty is therefore RETRACTED; the surviving delta is the engineering envelope only (crowd scale at 20Hz, two-brain sync discipline, L1 literal-density admission filter, L4 competence-gated consultation) — recorded in riir-ai `.issues/1022`.
 
 ---
 
