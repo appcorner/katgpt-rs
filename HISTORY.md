@@ -20,6 +20,15 @@ Issue 139 tracks the healer consumer and is unblocked by this landing.
   σ̂ inflates the asymptote 200 → 332.
 - Kill clock (from the issue): no consumer within 30 days of `9ad5e21ce`
   (i.e. by 2026-10-31) ⇒ goat-audit stall class — demote or remove.
+- Consumer status (2026-10-01): riir-clippy Issue 139 T3 consumes
+  `filter_bias_bound` (opt-in `noise_weighted_evidence`, riir-clippy
+  `e5b4d56d`). The T3 consumer (`best_belief_score_weighted`) was measured
+  a NO-OP on live data and deferred (riir-clippy `e10a9e2b`): across 8 live
+  healer stores, 10 of 657 groups with n ≥ 2 mix outcomes and 0.89% of
+  outcomes are failures. Every exogenous σ̂ floors, so the G3 bit-identical
+  path is taken. At the kill clock, read T1/T2 as adopted and T3/T4 as
+  having no live consumer. That is a property of the healer's evidence,
+  not of the primitive.
 
 ## Issue 912 (2026-10-01) — Dirichlet-distribution primitives: sampler repair + exact explore-dial sampling + Dirichlet-EMA (Research 596): CLOSED (T1–T5 landed opt-in; file removed per noise-reduction)
 
