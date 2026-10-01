@@ -3610,6 +3610,13 @@ pub mod ladder_gate;
 #[cfg(feature = "chance_puct")]
 pub mod chance_puct;
 
+// two_fidelity_bai — certified two-fidelity BAI for minimax trees (Plan 615,
+// Research 601, arXiv:2606.01708): interval minimax backup + time-uniform
+// slow CIs + ε-stop with first-class certificates. Opt-in
+// (`two_fidelity_bai`); the default search slot keeps mcts_search.
+#[cfg(feature = "two_fidelity_bai")]
+pub mod two_fidelity_bai;
+
 /// Exact-mass sigmoid admission (Issue 879 / Research 584, arXiv:2609.25518
 /// "Matryoshka attribution") — the calibrated-mass "sigmoid top-k": bisect
 /// τ until Σσ((s−τ)/T) = k, emit the soft mask mᵢ = σ((sᵢ−τ)/T). Sum-to-k,

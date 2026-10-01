@@ -420,6 +420,21 @@ kl_depth_probe = []
 # promotion owner-gated per the 525/Bench-834 precedent.
 saddle_escape = ["gain_cost_halt"]
 
+# two_fidelity_bai (Plan 615 / Research 601, arXiv:2606.01708 "Two-Fidelity
+# Best-Action Identification for Stochastic Minimax Tree", NeurIPS 2026):
+# certified two-fidelity BAI for minimax trees — interval minimax backup
+# (fast envelope ∩ time-uniform slow CI) + leader/challenger ε-stopping + a
+# budgeted local-vs-recursive race with latched side-certificates. GOAT gate
+# (plan Phase 2): strict paired win on the unified cost model vs BAI-MCTS
+# (Kaufmann–Koolen 2017) and a negamax-UCT adapter at matched accuracy, PAC
+# empirical error via one-sided Clopper–Pearson, zero-alloc steady state.
+# Pure query-allocation + interval bookkeeping — zero deps (arrayvec already
+# non-optional). OPT-IN and expected to stay opt-in (the default search slot
+# keeps mcts_search; this fills the empty certified-search slot). Phase 1
+# foundations landed T1.1–T1.4 + T1.7; the root race loop (T1.5/T1.6) is in
+# flight.
+two_fidelity_bai = []
+
 # guided_width_rollouts (Issue 895 / Research 590 GRAM re-distill,
 # arXiv:2605.19376; Bench 898 completes Plan 095's pending width-vs-depth
 # G1/G3): N parallel hypotheses of K steps over a caller-supplied
