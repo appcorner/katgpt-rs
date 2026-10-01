@@ -3137,7 +3137,7 @@ cargo refine --fix --write --verify --verify-args "--features <set>" <paths>  # 
 ```
 
 - Global binary `cargo refine` = `~/.cargo/bin/cargo-refine` → the sibling
-  `riir-clippy/target/release/cargo-refine` (built `--features
+  `riir-refine/target/release/cargo-refine` (built `--features
   fix_verify,clippy_verify`; rebuild after healer source changes). Missing
   sibling → fall back to manual fixes + `cargo clippy --fix`.
 - `--verify` compiles baseline → applies → re-checks → auto-REVERTS breaking
