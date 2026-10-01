@@ -3504,6 +3504,14 @@ pub mod distance_abstain;
 #[cfg(feature = "dirichlet_dist")]
 pub mod dirichlet_dist;
 
+/// Grouped-evidence noise-weighting primitives (Issue 913, riir-train
+/// Research 463 ← arXiv:2609.36802 EasyPPO, the modelless half): Popoviciu
+/// variance floor, filter-bias bound, exogenous-σ̂ weighted Beta LCB with Kish
+/// `n_eff` disclosed, and noise-scaled rating K. Opt-in
+/// (`grouped_evidence_weighting`).
+#[cfg(feature = "grouped_evidence_weighting")]
+pub mod grouped_evidence;
+
 /// Fitted anchor tables — the SHARED streaming table-builder substrate
 /// (Issues 882+883 P0 / Research 586+587, the F1 fusion: one calibration
 /// pass, two consumers). Per-key streaming mean rows (they ARE the table

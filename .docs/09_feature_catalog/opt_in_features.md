@@ -5233,3 +5233,37 @@ claim; consumers unscheduled (T4 notes in the module docs:
 `evolve_belief_additive` sibling, riir-neuron-db consolidation merge,
 `bom_arena` hypothesis sampler). No coverage/prediction-interval claim →
 the conformal-naive floor does not bind these primitives.
+
+## 139. Grouped-Evidence Noise-Weighting — Variance Floor + Filter-Bias Bound + Weighted Beta LCB + Noise-Scaled K (Issue 913 / riir-train Research 463)
+
+The modelless half of EasyPPO (arXiv:2609.36802): weight each group of noisy
+evidence by `1/max(σ̂, ε)`. For EXOGENOUS weights (a function of the group,
+not of the outcome) the reweighting preserves the estimation optimum — that
+invariance law is the whole license, and its scope is enforced by the
+`ExogenousSigma` type (`prior_epoch` / `leave_one_out` / `design`
+constructors, no plug-in constructor; provenance rides every readout).
+
+- **`variance_floor(delta, n)`** — `Δ/(2√n)`, Popoviciu over an n-draw mean;
+  the ε floor and the design-level σ of a bounded-outcome group.
+- **`filter_bias_bound(gamma, p_not_c)`** — `2Γ·P(¬C)`, the bias budget a
+  filtered readout prints beside its number.
+- **`best_belief_score_weighted(groups, sigma, floor, eps)`** — fractional-
+  count Beta LCB through the shared `best_belief` solver; mean-one weights
+  per observation; Kish `n_eff`, `Estimand` and `SigmaProvenance` on every
+  `WeightedBelief`. Bit-identical to `best_belief_score` under uniform
+  weights. Best-arm identification **0.685 vs 0.617** unweighted (paired
+  LB95 +0.057); plug-in σ̂ negative control biases the pooled rate by
+  −0.042 toward the extreme (prior-epoch σ̂ +0.001). ~375 ns/call at G=16.
+  **A ranking score, not a calibrated interval** — measured parameter
+  coverage 0.883 at nominal 0.95 under overdispersion, so no UQ claim.
+- **`noise_scaled_k` + `update_scored_noise_scaled` / `update_f32_noise_scaled`**
+  — `K_eff = K·ε/max(σ̂, ε)`, bit-identical to fixed K at the floor. MSE
+  161 vs 2998 (K=32) and vs 1668 (fixed K at adaptive's own mean step);
+  plug-in σ̂ inflates the asymptote 200 → 332.
+
+Record: [Bench 905](../../.benchmarks/905_grouped_evidence_weighting_goat.md).
+
+🔧 Feature flag: `grouped_evidence_weighting` (katgpt-core, implies
+`best_belief` + `rating`), **OPT-IN** — consumers unscheduled (riir-clippy
+Issue 139, riir-dao, riir-reflex, riir-instinct, riir-ai rows in the issue).
+Kill clock: no consumer within 30 days of merge ⇒ goat-audit stall class.
