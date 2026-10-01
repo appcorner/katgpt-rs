@@ -10,6 +10,8 @@
 
 ---
 
+> **Addendum (2026-10-01, Research 600 cross-ref):** Duvvuri et al. [arXiv:2602.21371 "Interleaved Head Attention"] — convergent third signal that MULTI-KEY retrieval is the capacity bottleneck: cross-head pseudo-mixing's largest empirical win is Multi-Key Retrieval on RULER (+27/+32/+112% @4k/8k/16k), the same axis as this note's retrieval-head sparsity and riir-train Plan 433's positional-retrieval warm-up mechanism (arXiv:2609.39827). Three independent papers, one axis.
+
 ## Executive Summary
 
 RTPurbo demonstrates that full-attention LLMs are **intrinsically sparse** and can be converted to highly sparse inference with only ~600 training steps (~1M label tokens). Three key insights:
