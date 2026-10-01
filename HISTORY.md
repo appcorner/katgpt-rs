@@ -1,3 +1,34 @@
+## Issue 912 (2026-10-01) — Dirichlet-distribution primitives: sampler repair + exact explore-dial sampling + Dirichlet-EMA (Research 596): CLOSED (T1–T5 landed opt-in; file removed per noise-reduction)
+
+Source Research 596 / arXiv:2609.35553 Simplex Diffusion Models, Tier Gain. All
+primitives feature-gated `dirichlet_dist`, default-off; no default-on claim;
+owner gates scheduling (unscheduled primitive lane, consumers adopt separately);
+the conformal-naive floor does NOT bind these primitives (no coverage claim — it
+binds any future consumer claiming calibrated uncertainty).
+
+- T1 `7745cfb9c` (2026-09-30, ungated) — `data_probe/markov.rs::sample_dirichlet_into`
+  repaired to honor α (Marsaglia–Tsang + squeeze + small-α boost; the α=1
+  exponential path kept VERBATIM — bit-identical streams for existing callers);
+  `goat_g3_greedy_sampling_conservative` re-run at its now-genuine Dir(0.05)
+  peaked premise — thresholds held, no re-derivation needed; regression pin
+  `test_dirichlet_alpha_concentrates`; data_probe 26/26 × 3 release runs;
+  katgpt-core lib 2064/0 release. The GOAT test's silently-flat premise found
+  by the Research-596 verdict review is the live-defect half of the issue.
+- T2–T5 `9b98ee3dc` (2026-10-01, Bench 904) — `dirichlet_dist.rs`:
+  `sample_conc_into` + log-space `thinning_into` (grid α_min 0.01; the
+  fixed-vector thinning Jensen bias pinned against the paper's own simulation;
+  var ratio `(c+1)/(ρc+1)` pinned; ρ=1 bit-identity) at G2 183 ns @ N=8 (bar
+  1 µs) + G4 0 allocs; `DirichletEma<const M, const K>` fixed-size stack with
+  the FROZEN recursive op order bit-identical to a plain EMA and the drawn path
+  exactly `Dir(ε·shares)` (aggregation identity); the drawn-variance
+  correction `C = ε(1−β^M)` (NOT ε — the first test formula's 0.0568-vs-0.1483
+  miss caught it) and the two-term-LSE `ln 2` bug are the en-route findings;
+  module docs carry the consumer notes verbatim (perturbation_ensemble with the
+  reflex Bench-092 NEGATIVE caveat, katgpt-sense, neuron-db consolidation,
+  bom_arena) — no consumer repo touched.
+- Signature correction over the issue draft: `thinning_into` carries
+  `alpha: &[f32]` (exactness requires the B_i shapes); seed is `u64`.
+
 ## Plan 612 (2026-09-30) — PISA pyramid Top-K + LSE block selection: CLOSED with a G2 iso-quality NEGATIVE (latency slope CONFIRMED; two Phase-1 defects caught by the gate's pins, fixed with regressions)
 
 - **The gate caught two real Phase-1 defects BEFORE any number was quoted** — both shipped 2026-09-29, both invisible to the module's structural tests: (1) `coarse_to_fine_select` pushed candidate-ARRAY POSITIONS into the retained set as node ids (`nonforced.push(ci)`) — every non-trivial call expanded wrong subtrees and emitted candidate positions as leaf ids, masked because forced leaves are appended BY VALUE and the sorted/bounded asserts hold over garbage; caught by the new needle canary. (2) The leaf `ExactLse` arm returned `logsumexp_parts().1` (ln_z) WITHOUT `+max` — not comparable across blocks, and it deletes exactly the needle signal exact-LSE exists to preserve (the MSA/HGA dilution class); caught by the new per-candidate Jensen pin. Both fixed with regression pins (needle canary + `mean + ln cnt ≤ LSE` ladder pin), 10/10 module tests green.
@@ -4040,37 +4071,6 @@ transplant moka+PUCT, run laya h2h. Records
 P0 of riir-train Research 457: leaf crate `crates/katgpt-tetris` (not a
 core feature; precise dep for riir-reflexer). Deps `rayon`, `blake3`,
 `fastrand`.
-
-## Issue 912 (2026-10-01) — Dirichlet-distribution primitives: sampler repair + exact explore-dial sampling + Dirichlet-EMA (Research 596): CLOSED (T1–T5 landed opt-in; file removed per noise-reduction)
-
-Source Research 596 / arXiv:2609.35553 Simplex Diffusion Models, Tier Gain. All
-primitives feature-gated `dirichlet_dist`, default-off; no default-on claim;
-owner gates scheduling (unscheduled primitive lane, consumers adopt separately);
-the conformal-naive floor does NOT bind these primitives (no coverage claim — it
-binds any future consumer claiming calibrated uncertainty).
-
-- T1 `7745cfb9c` (2026-09-30, ungated) — `data_probe/markov.rs::sample_dirichlet_into`
-  repaired to honor α (Marsaglia–Tsang + squeeze + small-α boost; the α=1
-  exponential path kept VERBATIM — bit-identical streams for existing callers);
-  `goat_g3_greedy_sampling_conservative` re-run at its now-genuine Dir(0.05)
-  peaked premise — thresholds held, no re-derivation needed; regression pin
-  `test_dirichlet_alpha_concentrates`; data_probe 26/26 × 3 release runs;
-  katgpt-core lib 2064/0 release. The GOAT test's silently-flat premise found
-  by the Research-596 verdict review is the live-defect half of the issue.
-- T2–T5 `9b98ee3dc` (2026-10-01, Bench 904) — `dirichlet_dist.rs`:
-  `sample_conc_into` + log-space `thinning_into` (grid α_min 0.01; the
-  fixed-vector thinning Jensen bias pinned against the paper's own simulation;
-  var ratio `(c+1)/(ρc+1)` pinned; ρ=1 bit-identity) at G2 183 ns @ N=8 (bar
-  1 µs) + G4 0 allocs; `DirichletEma<const M, const K>` fixed-size stack with
-  the FROZEN recursive op order bit-identical to a plain EMA and the drawn path
-  exactly `Dir(ε·shares)` (aggregation identity); the drawn-variance
-  correction `C = ε(1−β^M)` (NOT ε — the first test formula's 0.0568-vs-0.1483
-  miss caught it) and the two-term-LSE `ln 2` bug are the en-route findings;
-  module docs carry the consumer notes verbatim (perturbation_ensemble with the
-  reflex Bench-092 NEGATIVE caveat, katgpt-sense, neuron-db consolidation,
-  bom_arena) — no consumer repo touched.
-- Signature correction over the issue draft: `thinning_into` carries
-  `alpha: &[f32]` (exactness requires the B_i shapes); seed is `u64`.
 
 - T1/T4 — `tetris_sim.rs` → `src/sim.rs` (byte-identical);
   `tetris_lookahead.rs` → `src/lookahead.rs`; `tetris_rulebook.rs` →
