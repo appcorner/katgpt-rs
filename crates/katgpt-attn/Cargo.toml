@@ -2,6 +2,7 @@
 name = "katgpt-attn"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 license = "MIT"
 description = "Attention stack primitives — GDN2 kernels, DashAttention, Chiaroscuro, RAT+ Bridge, EGA, StaticCal, DiagonalGate, FuncAttn composition. Extracted from katgpt-rs/src/ (Proposal 003 Phase 2)."
 repository = "https://github.com/katopz/katgpt-rs"

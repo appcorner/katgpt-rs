@@ -2,10 +2,14 @@
 members = ["crates/katgpt-attn", "crates/katgpt-attn-match", "crates/katgpt-backend", "crates/katgpt-band", "crates/katgpt-canon", "crates/katgpt-claim", "crates/katgpt-core", "crates/katgpt-dec", "crates/katgpt-deprecated", "crates/katgpt-device-verify", "crates/katgpt-forward", "crates/katgpt-hla", "crates/katgpt-kv", "crates/katgpt-micro-belief", "crates/katgpt-moka-wasm", "crates/katgpt-nn", "crates/katgpt-percepta", "crates/katgpt-personality", "crates/katgpt-proof-cert", "crates/katgpt-pruners", "crates/katgpt-quant", "crates/katgpt-ruliology", "crates/katgpt-sense", "crates/katgpt-sleep", "crates/katgpt-sparse", "crates/katgpt-spectral", "crates/katgpt-speculative", "crates/katgpt-tetris", "crates/katgpt-tokenizer", "crates/katgpt-transformer", "crates/katgpt-types", "crates/katgpt-validator", "."]
 resolver = "3"
 
+[workspace.package]
+rust-version = "1.98.1"
+
 [package]
 name = "katgpt-rs"
 version = "0.2.1"
 edition = "2024"
+rust-version.workspace = true
 publish = false  # dev/examples aggregator — never published. The katgpt-core crate family ships to crates.io.
 
 [dependencies]

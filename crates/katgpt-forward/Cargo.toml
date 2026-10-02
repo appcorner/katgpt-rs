@@ -2,6 +2,7 @@
 name = "katgpt-forward"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 license = "MIT"
 description = "Forward-pass composition context (ForwardContext) — the top-tier join point above katgpt-transformer + katgpt-pruners (Issue 007 Phase F)"
 repository = "https://github.com/katopz/katgpt-rs"
