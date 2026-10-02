@@ -1,3 +1,22 @@
+## Issue 914 (2026-10-01 → closed 2026-10-02) — Pseudo-head mixing runtime (IHA distill, Research 600): CLOSED NEGATIVE before any implementation (file removed per noise-reduction)
+
+Filed from Research 600 (arXiv:2602.21371) as an opt-in training-dependent
+runtime op, BLOCKED-ON riir-train Issue 606's arm-4/arm-5 evidence — the block
+condition did its job: the evidence landed first and killed the op. riir-train
+Bench 621 (`e6b94720`) measured arm 5 (post-hoc insertion of deterministic
+mixing into 12 trained MHA checkpoints): **catastrophic on both tasks** —
+ternary residual == the token-only-majority bound EXACTLY (150636/217661,
+exact rational match: 100% of the learned relational margin destroyed; the
+mild-looking −3.3 pt global drop was a floor artifact), binary probes at/below
+the majority-class rate; harm basis-change-generic (`|5a − 5b| ≤ 0.4 pts`,
+Hadamard not special); `5id` == arm 1 exactly on all 12 checkpoints (the
+insertion harness proven). No trained-with-mixing consumer exists in the stack
+(Research 600 §3/§4) ⇒ the pre-registered close clause fired. The construction
+vocabulary (`replication()` / `sign_flip_pair()` / `hadamard()`) remains in
+Research 600 §5 as expressivity witnesses only. Issue 606 arm 4 (does training
+AROUND a fixed layout help?) stays open as a training-side question — a strong
+positive there plus a materialized consumer is a fresh filing, not a reopen.
+
 ## Issue 913 (2026-10-01) — Grouped-evidence noise-weighting primitives (riir-train Research 463, EasyPPO modelless half): CLOSED (T1–T4 landed opt-in; file removed per noise-reduction)
 
 Source riir-train Research 463 ← arXiv:2609.36802 EasyPPO, GOAT-tier Gain. All

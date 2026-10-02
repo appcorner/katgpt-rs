@@ -65,12 +65,14 @@ Paths 1–3 for the learned empirical gains: n/a — the gains install circuits 
 
 **Weakest point (named upfront, revised at round 1):** the katgpt-rs track is now honestly labeled TRAINING-DEPENDENT — its utility requires a model trained with (or tolerant of) the mixing, no fixed-projection consumer exists in the stack (HLA refuted by grep), and the arm-5 insertion probe is expected to show degradation (Thm 2); if arm 5 is catastrophic AND no trained-with-mixing consumer materializes, Issue 914 closes negative and this note's modelless track reduces to the recorded constructions. Secondary: the in-process Model-based panel seat (disclosed §3; its evidence is the paper's Appendix D + Plan 433/389 files, checkable).
 
+**Arm-5 verdict (2026-10-02, [riir-train Bench 621](../../riir-train/.benchmarks/621_issue606_iha_m3_lane_arm1_arm5.md)): the close condition FIRED — Issue 914 CLOSED NEGATIVE** (file removed per noise-reduction; HISTORY row carries the paired-commit hash). Measured: post-hoc insertion of deterministic mixing into 12 trained MHA checkpoints destroys the learned relational function on BOTH tasks — ternary residual == the token-only-majority bound exactly (`150636/217661`, exact rational match; 100% of the learned margin gone), binary probes at/below the majority-class rate; harm basis-change-generic (`|5a − 5b| ≤ 0.4 pts`); `5id` == arm 1 exactly (harness proven). This note's modelless track reduces, exactly as pre-registered above, to the recorded constructions (§5 vocabulary stands as expressivity witnesses only). The training-side question (does training AROUND a fixed layout help — Issue 606 arm 4) stays open in riir-train; a strong positive there plus a materialized consumer is a fresh filing, not a reopen.
+
 ## 7. Routing (files created by this verdict)
 
 | File | Repo | Role |
 |---|---|---|
 | `.research/600_Interleaved_Head_Attention.md` | katgpt-rs | this note |
-| `.issues/914_pseudo_head_mixing_runtime.md` | katgpt-rs | opt-in training-dependent runtime op, BLOCKED-ON 606 arms 4+5 |
+| `.issues/914_pseudo_head_mixing_runtime.md` | katgpt-rs | CLOSED NEGATIVE 2026-10-02 (arm-5 catastrophic, Bench 621) — file removed per noise-reduction, record in HISTORY.md |
 | `.issues/606_iha_relation_composition_micro_rung.md` | riir-train | the evidence rung (Path 0.5; arms 4+5 carry the 914 classification) |
 | `.research/086_…md` addendum | katgpt-rs | convergent multi-key-retrieval signal |
 
