@@ -97,6 +97,11 @@ const C_B: f32 = 3.1;
 /// Input-row head suppression: `z_sym = −M·(x0 + x1) ≤ 0 < min(c_A, c_B)`,
 /// so the answer tokens always dominate the symbol rows at the query.
 const M_SUPPRESS: f32 = 1.0;
+/// Query-row suppression — same shape as M_SUPPRESS but 10× steeper: the
+/// contrast can push answer logits ~ω·|z−z_k| below their unguided values,
+/// and the query row must stay strictly below even those (a measured
+/// guidance-armed failure: with a zero query row the decode answered QUERY).
+const Q_SUPPRESS: f32 = 10.0;
 
 // ── The fixture ──────────────────────────────────────────────────────
 
@@ -152,12 +157,17 @@ impl LoopCdFixture {
         //   symbols: −M·(x0 + x1) (never wins at the query);
         //   ansA:    +g·x2 + c_A;
         //   ansB:    −g·x2 + c_B;
-        //   query:   zero row (never wins vs the biased answers).
+        //   query:   −Q·(x0 + x1) — never wins, INCLUDING under guidance:
+        //   the contrast can push BOTH answer logits below zero (the
+        //   all-zero row would then win the decode — measured), so the
+        //   query row must sit strictly below any post-guidance answer.
         let mut lm_head = vec![0.0f32; VOCAB * n];
         lm_head[SYM_A * n] = -M_SUPPRESS;
         lm_head[SYM_A * n + 1] = -M_SUPPRESS;
         lm_head[SYM_B * n] = -M_SUPPRESS;
         lm_head[SYM_B * n + 1] = -M_SUPPRESS;
+        lm_head[QUERY * n] = -Q_SUPPRESS;
+        lm_head[QUERY * n + 1] = -Q_SUPPRESS;
         lm_head[ANS_A * n + 2] = G_HEAD;
         lm_head[ANS_A * n + 3] = C_A;
         lm_head[ANS_B * n + 2] = -G_HEAD;
@@ -251,8 +261,92 @@ impl LoopCdFixture {
         pos: usize,
         elastic: Option<usize>,
     ) -> Vec<f32> {
+        self.forward_ext(
+            ctx,
+            cache,
+            ahla_cache,
+            residual_gate,
+            sdpa_gate,
+            token,
+            pos,
+            elastic,
+            #[cfg(feature = "loop_guidance")]
+            None,
+            #[cfg(feature = "loop_guidance")]
+            None,
+        )
+        .to_vec()
+    }
+
+    /// Guided variant (Plan 617 T2.3/Phase 3): optional LoopCD guidance and
+    /// settle exit threaded through to `forward_looped`. Only compiled when
+    /// the feature is on (the fixture's plain [`LoopCdFixture::run_tokens`]
+    /// covers every other posture).
+    #[cfg(feature = "loop_guidance")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_tokens_guided(
+        &self,
+        prefix: &[usize],
+        depth: usize,
+        guidance: Option<&mut katgpt_rs::transformer::loop_guidance::LoopGuidance>,
+        settle: Option<&mut katgpt_rs::transformer::loop_guidance::SettleExit>,
+    ) -> Vec<f32> {
         let config = &self.config;
-        let logits = forward_looped(
+        let mut ctx = ForwardContext::new(config);
+        let mut cache = MultiLayerKVCache::new(config);
+        let mut ahla_cache = MultiLayerAhlaCache::new(config);
+        let residual_gate = ResidualGate::new(MAX_LOOPS, config.n_embd);
+        let sdpa_gate = SdpaOutputGate::new(config.n_head, config.head_dim, config.n_embd);
+
+        for (p, &tok) in prefix.iter().enumerate() {
+            self.forward_ext(
+                &mut ctx,
+                &mut cache,
+                &mut ahla_cache,
+                &residual_gate,
+                &sdpa_gate,
+                tok,
+                p,
+                Some(1),
+                None,
+                None,
+            );
+        }
+        self.forward_ext(
+            &mut ctx,
+            &mut cache,
+            &mut ahla_cache,
+            &residual_gate,
+            &sdpa_gate,
+            QUERY,
+            prefix.len(),
+            Some(depth),
+            guidance,
+            settle,
+        )
+        .to_vec()
+    }
+
+    /// The one `forward_looped` invocation shape, covering every cfg'd slot
+    /// so all fixture consumers compile at any feature combination.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_ext<'a>(
+        &self,
+        ctx: &'a mut ForwardContext,
+        cache: &'a mut MultiLayerKVCache,
+        ahla_cache: &'a mut MultiLayerAhlaCache,
+        residual_gate: &'a ResidualGate,
+        sdpa_gate: &'a SdpaOutputGate,
+        token: usize,
+        pos: usize,
+        elastic: Option<usize>,
+        #[cfg(feature = "loop_guidance")]
+        guidance: Option<&mut katgpt_rs::transformer::loop_guidance::LoopGuidance>,
+        #[cfg(feature = "loop_guidance")]
+        settle: Option<&mut katgpt_rs::transformer::loop_guidance::SettleExit>,
+    ) -> &'a mut [f32] {
+        let config = &self.config;
+        forward_looped(
             ctx,
             &self.weights,
             cache,
@@ -273,9 +367,10 @@ impl LoopCdFixture {
             #[cfg(feature = "cadence_gate")]
             None,
             #[cfg(feature = "loop_guidance")]
-            None,
-        );
-        logits.to_vec()
+            guidance,
+            #[cfg(feature = "loop_guidance")]
+            settle,
+        )
     }
 }
 

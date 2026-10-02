@@ -1476,6 +1476,14 @@ name = "loopcd_fixture_gate"
 path = "tests/loopcd_fixture_gate.rs"
 required-features = ["lt2_looped"]
 
+# Plan 617 T2.1-T2.3 — settle-exit + loop-budget gates (fixture-backed:
+# exit semantics, budget classes, the quality-parity pin, the honest
+# stable-wrong cost pin, CandidateSet agreement, Superseded derivation).
+[[test]]
+name = "loop_guidance_settle_gates"
+path = "tests/loop_guidance_settle_gates.rs"
+required-features = ["loop_guidance", "lt2_looped"]
+
 # Plan 428 Phase 2 — Loop Stability Fix GOAT gate.
 # Verifies inter-loop RMSNorm in forward_looped: byte-identical when None,
 # logits finite with InterLoopNorm, latency overhead, norm control.
