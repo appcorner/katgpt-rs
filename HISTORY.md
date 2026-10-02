@@ -43,8 +43,11 @@ a zero-error suite needs n ≥ 59 to certify δ = 0.05; arithmetic, not a
 defect. The full n = 300 protocol passes it by construction.) The run
 surfaced the NEXT finding, filed as **Issue 916**: G2(a) vs BAI-MCTS fails
 on cost (2FFS 225k vs BAI 10.8k unified at (5,8)) — decomposed there into a
-non-δ-correct BAI baseline (stops with 4/8 errors) and the δ/node_cap
-dilution cost (~2 000 slow samples per certified node). Plan 615 Phase 3/4
+non-δ-correct BAI baseline (stops with 4/8 errors) and the primitive's own
+cost debt (~2 000 slow samples per certified node; the δ-dilution
+attribution is priced at only ~1.4× by closed-form arithmetic, so the
+~10×-vs-paper remainder is an unmeasured resolution-pattern question —
+Issue 916 carries the corrected decomposition). Plan 615 Phase 3/4
 stay gated on the Issue-916 re-arm.
 
 ## Issue 914 (2026-10-01 → closed 2026-10-02) — Pseudo-head mixing runtime (IHA distill, Research 600): CLOSED NEGATIVE before any implementation (file removed per noise-reduction)
