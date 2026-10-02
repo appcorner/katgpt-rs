@@ -189,7 +189,9 @@ impl NodeInterval {
     }
 
     /// Install the child-backup interval (Eq. 6) computed by the caller from
-    /// the children's *effective* intervals.
+    /// the children's *effective* intervals. Lemma 2.3 — backup preserves
+    /// validity and never widens — is asserted in debug builds (the max/min
+    /// of the children's endpoints is width-dominated by the widest child).
     pub fn set_child_backup(&mut self, kind: NodeKind, children: &[(f64, f64)]) {
         debug_assert!(!children.is_empty(), "backup over zero children");
         // Max: L = max child L, U = max child U (Eq. 6); Min: min — each
@@ -214,6 +216,18 @@ impl NodeInterval {
         self.child_lo = lo;
         self.child_hi = hi;
         self.child_set = true;
+        // Lemma 2.3 (width half): the installed interval is never wider than
+        // the widest child interval it was folded from.
+        let widest_child = children
+            .iter()
+            .map(|&(cl, ch)| ch - cl)
+            .fold(0.0_f64, f64::max);
+        debug_assert!(
+            hi - lo <= widest_child + 1e-9,
+            "Lemma 2.3 violated: backup width {} > widest child width {}",
+            hi - lo,
+            widest_child
+        );
     }
 
     /// Effective interval: `local ∩ child` (child absent ⇒ local alone).
@@ -1152,6 +1166,15 @@ mod tests {
             let true_best = (1..=3u32).map(|c| t.exact(c)).fold(f32::MIN, f32::max);
             let r = two_fidelity_search(&t, 0, &search_cfg(0.1, 0.05), &mut Xs(seed + 1_000));
             assert!(r.certified, "seed {seed}: must terminate certified");
+            // End-to-end validity (Thm 3.1's certificate body): on honest
+            // oracles every reported root interval contains the true value.
+            for &(handle, lo, hi) in &r.root_intervals {
+                let v = f64::from(t.exact(handle));
+                assert!(
+                    v >= lo - 1e-9 && v <= hi + 1e-9,
+                    "seed {seed}: true value {v} outside certified interval [{lo}, {hi}] for node {handle}"
+                );
+            }
             if t.exact(r.best_action) < true_best - 0.1 {
                 errors += 1;
             }
@@ -1160,6 +1183,22 @@ mod tests {
             errors <= 2,
             "PAC smoke: {errors} errors over 32 trees (δ = 0.05)"
         );
+    }
+
+    #[test]
+    fn search_is_deterministic_for_a_seed() {
+        let mut build = || {
+            let mut t = VecTree::new(1.0e6, 0.05);
+            t.push(0, NodeKind::Max, 0, 0.0, 0.2);
+            t.push(0, NodeKind::Max, 0, 0.0, 0.8);
+            t
+        };
+        let a = two_fidelity_search(&build(), 0, &search_cfg(0.05, 0.05), &mut Xs(91));
+        let b = two_fidelity_search(&build(), 0, &search_cfg(0.05, 0.05), &mut Xs(91));
+        assert_eq!(a.best_action, b.best_action);
+        assert_eq!(a.cost, b.cost);
+        assert_eq!(a.certified, b.certified);
+        assert_eq!(a.root_intervals, b.root_intervals);
     }
 
     #[test]
