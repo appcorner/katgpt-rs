@@ -460,12 +460,20 @@ pub(crate) fn gumbel_max_sample(logits: &[f32], rng: &mut fastrand::Rng) -> u32 
 /// near-tie inside one ulp of noise.
 #[inline]
 pub fn keyed_gumbel_noise(seed: u64, position: u64, token_id: u32) -> f32 {
-    let mut z = seed ^ position.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    z ^= (token_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    // SplitMix64 finalizer — full avalanche over the mixed key.
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
+    #[inline(always)]
+    fn fin(z: u64) -> u64 {
+        // SplitMix64 finalizer (Steele et al.) — full avalanche.
+        let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    // Nested finalize — insurance against structured collisions between
+    // the key parts: the seed⊕position mix is finished BEFORE the token
+    // joins, then the whole key is finished again.
+    let z = fin(
+        fin(seed ^ position.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            ^ (token_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9),
+    );
     let inv = 1.0f64 / (1u64 << 53) as f64;
     let u = ((z >> 11) as f64) * inv + inv * 0.5;
     (-(-u.ln()).ln()) as f32
@@ -933,14 +941,14 @@ mod tests {
     fn keyed_gumbel_max_sample_reproduces_the_categorical_distribution() {
         // The construction claim: argmax(logit + Gumbel(0,1)) samples from
         // softmax(logits). Three tokens with known probs (0.5, 0.3, 0.2);
-        // 30k distinct positions = 30k independent keyed draws. A wrong
-        // construction (missing noise, wrong noise scale) moves the
-        // frequencies far outside the ±4% band (binomial σ ≈ 0.3% here —
-        // the band is ~13σ, structural errors only).
+        // 100k distinct positions = 100k independent keyed draws. At n=100k
+        // the per-token binomial σ is 0.13–0.16%, so the ±1% band sits at
+        // ≥6σ — tight enough to catch a ~10% temperature error (which
+        // moves token 0 by ~1.4%) yet far from flake territory.
         let ln = |p: f64| (p as f32).ln();
         let logits = [ln(0.5), ln(0.3), ln(0.2)];
         let want = [0.5f32, 0.3, 0.2];
-        let n = 30_000u64;
+        let n = 100_000u64;
         let mut hits = [0u64; 3];
         for p in 0..n {
             hits[keyed_gumbel_max_sample(&logits, 0xDEADBEEF, p) as usize] += 1;
@@ -948,7 +956,7 @@ mod tests {
         for k in 0..3 {
             let freq = hits[k] as f32 / n as f32;
             assert!(
-                (freq - want[k]).abs() < 0.04,
+                (freq - want[k]).abs() < 0.01,
                 "token {k}: freq {freq} vs softmax {} (hits {})",
                 want[k],
                 hits[k]
