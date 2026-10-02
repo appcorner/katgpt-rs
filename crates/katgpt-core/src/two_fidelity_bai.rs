@@ -970,9 +970,13 @@ mod tests {
 
     /// Hand-built minimax tree: linear node ids, node 0 = root (Max). True
     /// leaf values are the slow means; `exact()` folds true minimax. The
-    /// envelope is `bias_scale · 2^-h` (nondecreasing in h, B(0) = 0 at
-    /// scale 0); slow noise is uniform ±`noise_amp` (sub-Gaussian parameter
-    /// `noise_amp/√3`, so a declared σ ≥ noise_amp is honest).
+    /// envelope is the CONTRACT shape `bias_scale · (1 − 2^-h)` (Issue 915
+    /// en-route note: the pre-fix `bias_scale · 2^-h` was DECREASING in h
+    /// with B(0) = bias_scale ≠ 0, contradicting the trait contract it
+    /// documents); slow noise is uniform ±`noise_amp` (sub-Gaussian
+    /// parameter `noise_amp/√3`, so a declared σ ≥ noise_amp is honest).
+    /// B(0) = 0 pins depth-0 nodes' fast oracle EXACT — tests wanting a
+    /// loose fast oracle push children at depth ≥ 1.
     struct VecTree {
         kind: Vec<NodeKind>,
         depth: Vec<u8>,
@@ -1042,7 +1046,7 @@ mod tests {
         }
 
         fn bias_envelope(&self, remaining_depth: u8) -> f32 {
-            self.bias_scale * 2.0_f32.powi(-i32::from(remaining_depth))
+            self.bias_scale * (1.0 - 2.0_f32.powi(-i32::from(remaining_depth)))
         }
 
         fn slow_sample(&self, node: u32, rng: &mut impl RngCore) -> f32 {
@@ -1093,14 +1097,17 @@ mod tests {
 
     #[test]
     fn empty_intersection_guard_terminates_with_default_action() {
-        // Dishonest fast oracle: node 1 declares B(0) = 1 but reports fast
-        // 10.0 for a true value of 0.0 — an E_δ violation the guard must
-        // detect (one slow sample collapses node 1's local interval to
-        // empty), then terminate with certified = false and the current
-        // leader as default action (paper B.3 convention), never looping.
+        // Dishonest fast oracle: node 1 declares B(2) = 0.75 (depth-2
+        // children; the contract shape gives B(0) = 0, which would make the
+        // liar's [10, 10] trivially certifiable before any sample) but
+        // reports fast 10.0 for a true value of 0.0 — an E_δ violation the
+        // guard must detect (one slow sample collapses node 1's local
+        // interval to empty), then terminate with certified = false and the
+        // current leader as default action (paper B.3 convention), never
+        // looping.
         let mut t = VecTree::new(1.0, 0.1);
-        t.push(0, NodeKind::Max, 0, 10.0, 0.0); // the liar
-        t.push(0, NodeKind::Max, 0, 9.0, 9.0);
+        t.push(0, NodeKind::Max, 2, 10.0, 0.0); // the liar
+        t.push(0, NodeKind::Max, 2, 9.0, 9.0);
         let r = two_fidelity_search(&t, 0, &search_cfg(0.01, 0.1), &mut Xs(14));
         assert!(!r.certified);
         assert_eq!(r.best_action, 1, "default action = leader at guard time");
@@ -1109,13 +1116,14 @@ mod tests {
 
     #[test]
     fn slow_only_route_terminates_certified_on_the_true_argmax() {
-        // A ~1e6 envelope makes the fast oracle useless; termination must
-        // ride the local slow route alone (local reversibility),
-        // interleaving the leader-L / challenger-U targets until the CIs
-        // separate beyond the stop rule.
+        // A ~1e6-scale envelope makes the fast oracle useless (depth-1
+        // children: the contract shape gives B(1) = 5e5 — B(0) = 0 would
+        // make depth-0 fast exact); termination must ride the local slow
+        // route alone (local reversibility), interleaving the leader-L /
+        // challenger-U targets until the CIs separate beyond the stop rule.
         let mut t = VecTree::new(1.0e6, 0.05);
-        t.push(0, NodeKind::Max, 0, 0.0, 0.2);
-        t.push(0, NodeKind::Max, 0, 0.0, 0.8);
+        t.push(0, NodeKind::Max, 1, 0.0, 0.2);
+        t.push(0, NodeKind::Max, 1, 0.0, 0.8);
         let r = two_fidelity_search(&t, 0, &search_cfg(0.05, 0.05), &mut Xs(15));
         assert!(r.certified);
         assert_eq!(r.best_action, 2);
@@ -1128,8 +1136,9 @@ mod tests {
     #[test]
     fn random_small_trees_recommend_epsilon_optimal_roots() {
         // PAC smoke (the heavy suite is T2's bench): 32 deterministic
-        // D=3/b=3 trees, honest loose envelopes (bias 0.08/0.04/0.02 at
-        // h=0/1/2 against declared 0.12·2^-h), a ≥0.3 root gap, ε = 0.1.
+        // D=3/b=3 trees, contract-honest envelopes (leaf fast EXACT — B(0)
+        // = 0; bias 0.04 at h=2 against declared 0.12·(1−2^−2) = 0.09; bias
+        // 0.02 at h=1 against declared 0.06), a ≥0.3 root gap, ε = 0.1.
         // Every recommendation must be certified and ε-optimal. Seeded
         // everywhere — no global RNG, fully deterministic.
         let mut errors = 0usize;
@@ -1154,8 +1163,8 @@ mod tests {
                             0.4 * xs.f64() as f32
                         };
                         let leaf = t.push(d2, NodeKind::Max, 0, 0.0, mean);
-                        let sign = if leaf.is_multiple_of(2) { 1.0_f32 } else { -1.0 };
-                        t.fast[leaf as usize] = mean + 0.08 * sign;
+                        // B(0) = 0 pins leaf fast values EXACT (contract).
+                        t.fast[leaf as usize] = mean;
                     }
                     let sign = if d2.is_multiple_of(2) { 1.0_f32 } else { -1.0 };
                     t.fast[d2 as usize] = t.exact(d2) + 0.04 * sign;
@@ -1189,8 +1198,8 @@ mod tests {
     fn search_is_deterministic_for_a_seed() {
         let build = || {
             let mut t = VecTree::new(1.0e6, 0.05);
-            t.push(0, NodeKind::Max, 0, 0.0, 0.2);
-            t.push(0, NodeKind::Max, 0, 0.0, 0.8);
+            t.push(0, NodeKind::Max, 1, 0.0, 0.2);
+            t.push(0, NodeKind::Max, 1, 0.0, 0.8);
             t
         };
         let a = two_fidelity_search(&build(), 0, &search_cfg(0.05, 0.05), &mut Xs(91));

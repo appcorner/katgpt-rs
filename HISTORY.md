@@ -1,3 +1,52 @@
+## Issue 915 (2026-10-02 → closed 2026-10-03) — two_fidelity_bai certified-interval invalidity: CLOSED — root cause was the BENCH FIXTURE, not the module (file removed per noise-reduction)
+
+Plan 615 Phase 2's GOAT gate reported certified root intervals excluding V*
+(24/40 trees at (5,8), misses always `true > hi`) plus 60% guard-fires, and
+the issue's working hypothesis blamed the T1.5 ρ_k/2 lazy-discharge
+recursion ("the recorded v1 divergence ... is now REFUTED by measurement").
+The hypothesis was WRONG. The fix session confirmed the real mechanism:
+
+**The bench fixture's slow oracle violated its own `MinimaxSpace` contract.**
+`BenchTree::generate` filled `mu` ONLY at the leaf level; `slow_sample`
+drew `mu[node] + U(−0.05, 0.05)` at EVERY node — so every internal node's
+slow samples centered on 0.0 while its true value V* ≈ 0.5. One internal
+slow sample drags that node's running-intersection slow CI to ≈0, which
+(a) empties `local = fast ∩ slow` ⇒ the root guard fires (the 24/40
+"guard-fires ≫ δ" — the guard doing exactly its paper-B.3 job on a detectable
+contract violation), or (b) caps `hi` at slow_hi ≈ 0.2 ≪ V* where the
+intervals still overlap ⇒ the ε-stop then CERTIFIES the polluted intervals
+(the `true > hi` misses, multiple root children per tree). The fixture
+honesty verification missed it because it checked `|fast − V*| ≤ envelope`
+node-by-node (fast WAS honest) and took "slow = μ ± 0.05" on faith without
+checking `mu[node] == vstar[node]` at internals — where it is 0.0 ≠ V*.
+The module's containment induction was sound all along.
+
+Fix (same session): `slow_sample` draws around `vstar[node]` — the contract
+mean at every node; leaves are bit-identical (`vstar == mu` there), so the
+UCT/leaf-sampling lanes keep their exact pre-fix sample values; the now-dead
+`mu` field is removed from the struct. The class is gated against recurrence:
+a **FIXTURE honesty** arm (fast envelope at every node + slow mean at
+internal nodes) runs before the suites. The module's own `VecTree` fixture
+moved to the contract envelope `bias_scale·(1 − 2^−h)` (the issue's
+en-route note: the pre-fix `bias_scale·2^−h` was decreasing with
+B(0) = bias_scale ≠ 0, contradicting the trait doc beside it), with test
+depths adjusted where the old shape was load-bearing (guard test children
+at depth 2 — under B(0) = 0 the liar's [10, 10] would be certified before
+any sample fires; slow-only tests at depth 1; the 32-tree PAC smoke's leaf
+fast values now EXACT). 20 module tests green; clippy `-D` clean at the
+feature and at default.
+
+Re-arm shakedown (`B615_TREES=8`): **8/8 certified at every setting, 0
+guard-fires, 0 invalid intervals, 0/24 pick errors — the G1 certificate
+arms PASS.** (The CP-picks arm reads 0.117 > δ at n = 24 with zero errors —
+a zero-error suite needs n ≥ 59 to certify δ = 0.05; arithmetic, not a
+defect. The full n = 300 protocol passes it by construction.) The run
+surfaced the NEXT finding, filed as **Issue 916**: G2(a) vs BAI-MCTS fails
+on cost (2FFS 225k vs BAI 10.8k unified at (5,8)) — decomposed there into a
+non-δ-correct BAI baseline (stops with 4/8 errors) and the δ/node_cap
+dilution cost (~2 000 slow samples per certified node). Plan 615 Phase 3/4
+stay gated on the Issue-916 re-arm.
+
 ## Issue 914 (2026-10-01 → closed 2026-10-02) — Pseudo-head mixing runtime (IHA distill, Research 600): CLOSED NEGATIVE before any implementation (file removed per noise-reduction)
 
 Filed from Research 600 (arXiv:2602.21371) as an opt-in training-dependent

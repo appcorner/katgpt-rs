@@ -138,8 +138,9 @@ struct BenchTree {
     b: usize,
     starts: Vec<usize>, // level l nodes occupy [starts[l], starts[l+1])
     kind: Vec<NodeKind>,
-    mu: Vec<f64>,    // true leaf means
-    vstar: Vec<f64>, // exact minimax values (ground truth)
+    vstar: Vec<f64>, // exact minimax values (ground truth; every node — also
+    //                 the slow-oracle mean: leaves carry their drawn mean,
+    //                 internals fold it up)
     fast: Vec<f32>,  // fast-oracle values with the chosen adversarial sign
     flipped: bool,   // did the adversarial sign flip the fast-only root pick?
     noise_amp: f32,
@@ -287,7 +288,6 @@ impl BenchTree {
                 b,
                 starts: starts.clone(),
                 kind: kind.clone(),
-                mu: mu.clone(),
                 vstar: vstar.clone(),
                 fast: chosen_fast.clone(),
                 flipped,
@@ -303,7 +303,6 @@ impl BenchTree {
             b,
             starts,
             kind,
-            mu,
             vstar,
             fast: chosen_fast,
             flipped,
@@ -341,7 +340,13 @@ impl MinimaxSpace for BenchTree {
     }
 
     fn slow_sample(&self, node: u32, rng: &mut impl RngCore) -> f32 {
-        (self.mu[node as usize] + (rng.f64() - 0.5) * 2.0 * f64::from(self.noise_amp)) as f32
+        // Contract (MinimaxSpace): i.i.d. mean V*(v) — vstar at EVERY node,
+        // not mu (leaf-only). Issue 915's root cause was sampling mu here:
+        // internals sat at 0.0, so every internal slow CI converged far
+        // below V*, capping `hi` and firing the guard. Leaves are identical
+        // (vstar == mu), so leaf-sampling consumers (UCT, leaf lanes) keep
+        // their exact pre-fix sample values.
+        (self.vstar[node as usize] + (rng.f64() - 0.5) * 2.0 * f64::from(self.noise_amp)) as f32
     }
 }
 
@@ -1011,6 +1016,49 @@ fn main() {
             &format!("UCT pick {pick100k} != true best {best} at budget 100k"),
         );
         gate(e100k <= 0.02, &format!("UCT value error {e100k} > 0.02 at 100k"));
+    });
+
+    // ── FIXTURE honesty (Issue 915's class, gated so it cannot recur): the
+    // oracle pair must satisfy the MinimaxSpace contract — fast biased within
+    // the declared envelope at EVERY node, slow samples centered on V* at
+    // EVERY node (not just leaves). The 915 negative ran on a fixture whose
+    // internal slow samples centered at 0.0; nothing caught it because no
+    // arm checked the slow mean.
+    gates.run("FIXTURE honesty (fast envelope + slow mean, every node class)", || {
+        for &(d, b) in SETTINGS.iter() {
+            let tree = BenchTree::generate(d, b, 0x615_00F1, NOISE_AMP);
+            // Fast: |V_F − V*| ≤ B(h) + f32 representation slack, every node.
+            for (i, &v) in tree.vstar.iter().enumerate() {
+                let lvl = tree.level_of(i as u32);
+                let h = (i32::from(tree.d) - lvl as i32).max(0);
+                let env = f64::from(tree.bias_envelope(h as u8));
+                let bias = (f64::from(tree.fast[i]) - v).abs();
+                gate(
+                    bias <= env + 1e-5,
+                    &format!("D{d}b{b}: fast bias {bias:.6} > envelope {env:.6} at node {i}"),
+                );
+            }
+            // Slow: samples centered on V*. Statistical read on one internal
+            // node (level 1 — the class Issue 915 broke) and one deeper node:
+            // U(−a, a) has sd = a/√3 ≈ 0.0289, so 400 draws give se ≈ 0.0014;
+            // the 0.02 floor is ~14 se of pure noise but an order below the
+            // 0.5-scale defect (mean 0.0 vs V* ≈ 0.5).
+            let mut rng = Xs(0x615_00F2);
+            for &node in &[1u32, (1 + b) as u32] {
+                const N: u64 = 400;
+                let mut acc = 0.0_f64;
+                for _ in 0..N {
+                    acc += f64::from(tree.slow_sample(node, &mut rng));
+                }
+                let dev = (acc / N as f64 - tree.vstar[node as usize]).abs();
+                gate(
+                    dev < 0.02,
+                    &format!(
+                        "D{d}b{b}: slow mean deviates {dev:.6} from V* at internal node {node} — contract violation"
+                    ),
+                );
+            }
+        }
     });
 
     // ── T2.1–T2.2 suite per setting ──
