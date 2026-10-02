@@ -521,6 +521,15 @@ pub use ugc_schedule::{
     equal_sqrt_mass_grid, estimate_interval, estimate_profile, inv_log_reveal_odds,
     log_reveal_odds, reveal_grid_from_plan, reveal_odds,
 };
+// Min-max DP partition under a pairwise-distance ε oracle (Plan 616 — the
+// TWT phase-collapse lane's partition primitive, promoted verbatim from
+// riir-infer `twt::partition`, Issue 022 T2.1 / Research 594 row 2).
+// NEIGHBOR of `ugc_schedule::dp_partition` (min-SUM fixed-k, paper Eq 39)
+// — the generalize-vs-neighbor decision and the cross-link live in the
+// module doc. Opt-in per the no-default-consumer rule; first consumer is
+// riir-infer's twt lane (re-exporting since the promotion commit).
+#[cfg(feature = "minmax_partition")]
+pub mod partition;
 // SwitchCostTable — directed pairwise switch-difficulty table (skill-entropy
 // distillation, Research 484 / arXiv:2608.05139, Issue 663). Opt-in per the
 // issue's GOAT-gate discipline: promotion to default requires a riir-ai
