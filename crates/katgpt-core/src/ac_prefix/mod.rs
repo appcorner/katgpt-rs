@@ -75,5 +75,9 @@ mod types;
 
 pub use forward::ForwardForAcPrefix;
 pub use types::{AcPrefix, AcPrefixMask};
+// The keyed-Gumbel verify-sampling pair (position-keyed noise — the
+// order-invariant shared stream drafter proposals and target verify
+// samples consume; Plan-614 substrate row).
+pub use types::{keyed_gumbel_max_sample, keyed_gumbel_noise};
 
 pub(crate) use types::gumbel_max_sample;

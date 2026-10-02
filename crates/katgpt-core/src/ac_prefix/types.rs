@@ -436,6 +436,69 @@ pub(crate) fn gumbel_max_sample(logits: &[f32], rng: &mut fastrand::Rng) -> u32 
     best_idx as u32
 }
 
+/// Keyed Gumbel noise: `g(seed, position, token_id)` — a pure function of
+/// its key. The same `(seed, position, token)` triple always yields the
+/// same noise regardless of evaluation order or batch composition, which
+/// is the order-invariance a speculative verify loop needs: a position's
+/// sampled token is decided by its key alone (the position-keyed-noise
+/// rule, promoted from the corpus rule to a runtime primitive for the
+/// Plan-614 DFlash2 lane — drafter proposals and target verify samples
+/// share one keyed stream, so a draft token coincides with the target's
+/// own sample exactly when the two score orderings agree after the shared
+/// noise).
+///
+/// Construction: the key parts are mixed (wrapping — overflow wraps by
+/// contract, never panics) and pushed through the SplitMix64 finalizer
+/// (Steele et al., full avalanche), then 53 uniform bits map to
+/// `u = bits·2⁻⁵³ + 2⁻⁵⁴`, which lies in the OPEN interval (0, 1) by
+/// construction — no redraw loop, which a pure function of the key could
+/// not perform anyway. `g = -ln(-ln(u))` is finite for every key.
+///
+/// Platform note: `ln` is the platform libm's IEEE-754 log. Same-platform
+/// determinism (the verify loop's requirement) is exact; cross-platform
+/// bit-identity of the SAMPLED TOKEN is not claimed — a flip requires a
+/// near-tie inside one ulp of noise.
+#[inline]
+pub fn keyed_gumbel_noise(seed: u64, position: u64, token_id: u32) -> f32 {
+    let mut z = seed ^ position.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z ^= (token_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    // SplitMix64 finalizer — full avalanche over the mixed key.
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let inv = 1.0f64 / (1u64 << 53) as f64;
+    let u = ((z >> 11) as f64) * inv + inv * 0.5;
+    (-(-u.ln()).ln()) as f32
+}
+
+/// Keyed Gumbel-max sample: `argmax_i (logits[i] + g(seed, position, i))`
+/// — the categorical sample whose randomness is a pure function of
+/// `(seed, position, token_id)` with the vocab index standing in for the
+/// token id (full-vocab sampling, the target side of a verify loop; index
+/// == token id there). Deterministic given the key: re-running a position
+/// reproduces its token bit-identically, and no other position's or
+/// batch-row's evaluation can perturb it. Returns `0` on an empty input.
+///
+/// This samples from `softmax(logits)` at temperature 1; a caller decoding
+/// at temperature `T` scales its logits by `1/T` first (the standard
+/// compositional form — noise scale and temperature are redundant knobs).
+#[inline]
+pub fn keyed_gumbel_max_sample(logits: &[f32], seed: u64, position: u64) -> u32 {
+    if logits.is_empty() {
+        return 0;
+    }
+    let mut best_idx = 0usize;
+    let mut best_score = f32::NEG_INFINITY;
+    for (i, &l) in logits.iter().enumerate() {
+        let score = l + keyed_gumbel_noise(seed, position, i as u32);
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+    best_idx as u32
+}
+
 /// Bit-packed attention mask for the augmented sequence.
 ///
 /// Layout: `augmented_len × augmented_len` bits, row-major. The bit at offset
@@ -812,5 +875,84 @@ mod tests {
         );
         assert_eq!(sampled.len(), 2);
         assert_eq!(sampled, vec![5, 5], "all eval slots should pick peak=5");
+    }
+
+    #[test]
+    fn keyed_gumbel_noise_is_a_pure_function_of_its_key() {
+        // Same key → same noise, regardless of call order or interleaving.
+        let a = keyed_gumbel_noise(42, 7, 1234);
+        let _ = keyed_gumbel_noise(42, 7, 1235);
+        let _ = keyed_gumbel_noise(43, 7, 1234);
+        let _ = keyed_gumbel_noise(42, 8, 1234);
+        assert_eq!(keyed_gumbel_noise(42, 7, 1234), a);
+        // Distinct keys produce distinct noise (avalanche — spot-check a
+        // dense sweep instead of asserting on any single pair).
+        let mut distinct = 0u32;
+        for k in 0..1000u64 {
+            if keyed_gumbel_noise(k, k * 3, (k % 997) as u32)
+                != keyed_gumbel_noise(k + 1, k * 3, (k % 997) as u32)
+            {
+                distinct += 1;
+            }
+        }
+        assert!(
+            distinct > 950,
+            "adjacent-seed keys should almost never collide: {distinct}/1000"
+        );
+        // Finite for every key — the open-interval u construction means no
+        // redraw and no NaN/inf, swept across the key space.
+        for s in [0u64, 1, u64::MAX] {
+            for p in [0u64, 1, u64::MAX / 2] {
+                for t in [0u32, 1, u32::MAX] {
+                    let g = keyed_gumbel_noise(s, p, t);
+                    assert!(g.is_finite(), "noise not finite at ({s},{p},{t})");
+                    assert!(g.abs() < 64.0, "noise out of Gumbel range: {g}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_gumbel_max_sample_is_deterministic_and_greedy_in_the_limit() {
+        let logits: Vec<f32> = (0..64).map(|i| (i as f32) * 0.37 - 8.0).collect();
+        // Determinism: the same key reproduces the sample bit-identically.
+        let first = keyed_gumbel_max_sample(&logits, 9, 55);
+        assert_eq!(keyed_gumbel_max_sample(&logits, 9, 55), first);
+        // The noise is bounded (|g| ≲ 40), so a logit gap far above that
+        // bound forces the argmax — the greedy limit of the keyed sample.
+        let mut peaked = vec![-1000.0f32; 64];
+        peaked[17] = 1000.0;
+        for p in 0..200u64 {
+            assert_eq!(keyed_gumbel_max_sample(&peaked, 3, p), 17);
+        }
+        // Empty input → 0 (matches `gumbel_max_sample`).
+        assert_eq!(keyed_gumbel_max_sample(&[], 1, 1), 0);
+    }
+
+    #[test]
+    fn keyed_gumbel_max_sample_reproduces_the_categorical_distribution() {
+        // The construction claim: argmax(logit + Gumbel(0,1)) samples from
+        // softmax(logits). Three tokens with known probs (0.5, 0.3, 0.2);
+        // 30k distinct positions = 30k independent keyed draws. A wrong
+        // construction (missing noise, wrong noise scale) moves the
+        // frequencies far outside the ±4% band (binomial σ ≈ 0.3% here —
+        // the band is ~13σ, structural errors only).
+        let ln = |p: f64| (p as f32).ln();
+        let logits = [ln(0.5), ln(0.3), ln(0.2)];
+        let want = [0.5f32, 0.3, 0.2];
+        let n = 30_000u64;
+        let mut hits = [0u64; 3];
+        for p in 0..n {
+            hits[keyed_gumbel_max_sample(&logits, 0xDEADBEEF, p) as usize] += 1;
+        }
+        for k in 0..3 {
+            let freq = hits[k] as f32 / n as f32;
+            assert!(
+                (freq - want[k]).abs() < 0.04,
+                "token {k}: freq {freq} vs softmax {} (hits {})",
+                want[k],
+                hits[k]
+            );
+        }
     }
 }

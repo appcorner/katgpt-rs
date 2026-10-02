@@ -1391,6 +1391,11 @@ pub use certified_frontier::{CertifiedManifoldGraph, certified_manifold_graph};
 
 #[cfg(feature = "ac_prefix")]
 pub use ac_prefix::{AcPrefix, AcPrefixMask};
+// The keyed-Gumbel verify-sampling pair (position-keyed noise — the
+// order-invariant shared stream drafter proposals and target verify
+// samples consume; Plan-614 substrate row).
+#[cfg(feature = "ac_prefix")]
+pub use ac_prefix::{keyed_gumbel_max_sample, keyed_gumbel_noise};
 
 #[cfg(feature = "flow_field_nav")]
 pub mod flow;
