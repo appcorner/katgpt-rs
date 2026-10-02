@@ -1484,6 +1484,16 @@ name = "loop_guidance_settle_gates"
 path = "tests/loop_guidance_settle_gates.rs"
 required-features = ["loop_guidance", "lt2_looped"]
 
+# Plan 617 T3.2-T3.4 — the LoopCD GOAT: the adjudication ladder on the
+# frozen non-saturated fixture (guided vs unguided vs three incumbents +
+# the cheap-weak control, greedy argmax; interleaved A/B overhead; net-FLOP
+# + settle-exit budget accounting). weight_shared_advantage_gate supplies
+# the exit-only incumbent arm (product_policy_log + AdvantageMarginGate).
+[[test]]
+name = "loop_guidance_goat"
+path = "tests/loop_guidance_goat.rs"
+required-features = ["loop_guidance", "lt2_looped", "weight_shared_advantage_gate"]
+
 # Plan 428 Phase 2 — Loop Stability Fix GOAT gate.
 # Verifies inter-loop RMSNorm in forward_looped: byte-identical when None,
 # logits finite with InterLoopNorm, latency overhead, norm control.

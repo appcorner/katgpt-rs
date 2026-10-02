@@ -249,6 +249,43 @@ impl LoopCdFixture {
         self.run_tokens(&case.prefix, depth)
     }
 
+    /// Full case run that ALSO returns the final query hidden state
+    /// (`ctx.hidden_state`, the post-loop pre-head state) — the early-tap
+    /// incumbent arm reads it to build its weak side.
+    pub fn run_tokens_with_hidden(&self, prefix: &[usize], depth: usize) -> (Vec<f32>, Vec<f32>) {
+        let config = &self.config;
+        let mut ctx = ForwardContext::new(config);
+        let mut cache = MultiLayerKVCache::new(config);
+        let mut ahla_cache = MultiLayerAhlaCache::new(config);
+        let residual_gate = ResidualGate::new(MAX_LOOPS, config.n_embd);
+        let sdpa_gate = SdpaOutputGate::new(config.n_head, config.head_dim, config.n_embd);
+
+        for (p, &tok) in prefix.iter().enumerate() {
+            self.forward(
+                &mut ctx,
+                &mut cache,
+                &mut ahla_cache,
+                &residual_gate,
+                &sdpa_gate,
+                tok,
+                p,
+                Some(1),
+            );
+        }
+        let logits = self.forward(
+            &mut ctx,
+            &mut cache,
+            &mut ahla_cache,
+            &residual_gate,
+            &sdpa_gate,
+            QUERY,
+            prefix.len(),
+            Some(depth),
+        );
+        let hidden = ctx.hidden_state[..config.n_embd].to_vec();
+        (logits, hidden)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
