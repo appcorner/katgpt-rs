@@ -146,6 +146,26 @@ impl NodeInterval {
         }
     }
 
+    /// Oracle-less interval: the fast component is `(−∞, +∞)` so `local` is
+    /// the slow CI alone. The single-fidelity propagation consumer
+    /// (LUCB-MCTS-style baselines — Issue 916's corrected BAI arm) and any
+    /// oracle-free CI carrier: internals install the Eq. 6 child fold via
+    /// [`Self::set_child_backup`], leaves accumulate [`Self::observe_slow`].
+    pub fn slow_only() -> Self {
+        Self {
+            fast_lo: f64::NEG_INFINITY,
+            fast_hi: f64::INFINITY,
+            slow_lo: f64::NEG_INFINITY,
+            slow_hi: f64::INFINITY,
+            slow_n: 0,
+            welford_mean: 0.0,
+            welford_m2: 0.0,
+            child_lo: f64::NEG_INFINITY,
+            child_hi: f64::INFINITY,
+            child_set: false,
+        }
+    }
+
     /// Absorb one slow sample (Eq. 4): Welford update + running-intersection
     /// clamp with the time-uniform radius [`beta`]. Monotone shrink — the
     /// Lemma B.2 nesting invariant — is asserted in debug builds.
@@ -928,6 +948,21 @@ mod tests {
     }
 
     // ── T1.4 helpers ─────────────────────────────────────────────────────
+
+    #[test]
+    fn slow_only_carries_the_slow_ci_and_the_child_fold_alone() {
+        // The oracle-less carrier (Issue 916's LUCB-MCTS baseline): local is
+        // the running slow CI, never an accidental [0, 0] fast point; an
+        // installed child fold passes through `effective` untouched.
+        let mut leaf = NodeInterval::slow_only();
+        assert_eq!(leaf.local(), (f64::NEG_INFINITY, f64::INFINITY));
+        leaf.observe_slow(0.3, 0.05, 1e-3);
+        let (lo, hi) = leaf.local();
+        assert!(lo.is_finite() && hi.is_finite() && hi > lo);
+        let mut node = NodeInterval::slow_only();
+        node.set_child_backup(NodeKind::Min, &[(0.2, 0.4), (0.3, 0.9)]);
+        assert_eq!(node.effective(), (0.2, 0.4));
+    }
 
     #[test]
     fn delta_allocation_sums_to_delta() {

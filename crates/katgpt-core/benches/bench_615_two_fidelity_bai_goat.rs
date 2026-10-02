@@ -82,9 +82,10 @@
 
 use arrayvec::ArrayVec;
 use katgpt_core::two_fidelity_bai::{
-    two_fidelity_search, Cost, MinimaxSpace, NodeKind, RngCore, SearchConfig, TwoFidelityResult,
-    MAX_CHILDREN, NODE_CAP,
+    two_fidelity_search, Cost, MinimaxSpace, NodeInterval, NodeKind, RngCore, SearchConfig,
+    TwoFidelityResult, MAX_CHILDREN, NODE_CAP,
 };
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -497,64 +498,197 @@ impl<'a> UctSearch<'a> {
     }
 }
 
-/// T2.2(a) BAI-MCTS: LUCB-style fixed-confidence stopping (Kaufmann–Koolen
-/// 2017 class) at the same (ε, δ) as 2FFS. First K rounds visit each arm
-/// once; then leader/challenger targeted descents alternate by round parity.
-/// Radius r(n) = sqrt(ln(2·K·t/δ)/(2n)). Cap = stopping failure.
+/// T2.2(a) BAI-MCTS: LUCB-MCTS / UGapE-MCTS (Kaufmann & Koolen 2017 class)
+/// at the same (ε, δ) as 2FFS — the δ-correct bound-propagation baseline
+/// (Issue 916 cause (a)). The pre-fix arm stopped on point-extreme root
+/// estimates with arm-level radii that never covered the deep max/min
+/// backup bias and erred 61/100 at (5,8) — three orders over δ — so its
+/// "cost" was the price of an inaccurate stop, not a PAC competitor.
+/// This version propagates per-leaf time-uniform slow CIs (the module's own
+/// `NodeInterval` machinery, the same β/δ_v rule as `two_fidelity_search`:
+/// δ_v = δ/NODE_CAP) through Eq. 6 backups — internal (L, U) = (max|min
+/// child L, max|min child U) with unrevealed children at (−∞, +∞) — and
+/// stops only when the propagated root intervals certify the leader.
+/// Descent follows the target endpoint's binding child (the bottleneck:
+/// unrevealed = −∞ binds argmin/loses argmax on the L side, +∞ binds
+/// argmax/loses argmin on the U side; ties → lowest handle), one slow
+/// sample per round; leader-L and challenger-U descents alternate.
+/// Documented divergences from KKC: their exact confidence sequence is
+/// replaced by the module's stitched time-uniform radius with the uniform
+/// per-leaf δ allocation (fairness: the baseline shares 2FFS's confidence
+/// machinery, isolating the two-fidelity mechanism), and their gap-indexed
+/// sampling rule is replaced by the deterministic alternation.
+struct LucbNode {
+    interval: NodeInterval,
+    kind: NodeKind,
+    kids: ArrayVec<u32, MAX_CHILDREN>, // empty = leaf
+}
+
+struct LucbSearch<'a> {
+    tree: &'a BenchTree,
+    nodes: HashMap<u32, LucbNode>,
+    samples: u64,
+}
+
+impl<'a> LucbSearch<'a> {
+    fn new(tree: &'a BenchTree) -> Self {
+        Self {
+            tree,
+            nodes: HashMap::with_capacity(1024),
+            samples: 0,
+        }
+    }
+
+    fn delta_v(&self) -> f64 {
+        DELTA / f64::from(NODE_CAP)
+    }
+
+    fn reveal(&mut self, v: u32) {
+        use std::collections::hash_map::Entry;
+        if let Entry::Vacant(e) = self.nodes.entry(v) {
+            let mut kids = ArrayVec::new();
+            if !self.tree.is_leaf(v) {
+                self.tree.children_into(v, &mut kids);
+            }
+            e.insert(LucbNode {
+                interval: NodeInterval::slow_only(),
+                kind: self.tree.kind[v as usize],
+                kids,
+            });
+        }
+    }
+
+    fn bounds(&self, v: u32) -> (f64, f64) {
+        self.nodes[&v].interval.effective()
+    }
+
+    fn endpoint(&self, v: u32, upper: bool) -> f64 {
+        let (lo, hi) = self.bounds(v);
+        if upper { hi } else { lo }
+    }
+
+    /// Optimistic descent to the leaf binding `side` at `start`: at each
+    /// internal node follow the child whose `side` endpoint is the Eq. 6
+    /// fold's argument (argmax at Max, argmin at Min), with unrevealed
+    /// children at the side's neutral sentinel (−∞ lower / +∞ upper) so the
+    /// bottleneck — an unexplored subtree exactly where it caps the bound —
+    /// is entered first. Ties → lowest handle. Returns (leaf, path).
+    fn descend(&mut self, start: u32, upper: bool) -> (u32, Vec<u32>) {
+        let mut path = Vec::with_capacity(16);
+        let mut cur = start;
+        loop {
+            self.reveal(cur);
+            path.push(cur);
+            let kids = self.nodes[&cur].kids.clone();
+            if kids.is_empty() {
+                return (cur, path);
+            }
+            let want_max = self.nodes[&cur].kind == NodeKind::Max;
+            let mut best = kids[0];
+            let mut best_key = self.endpoint_key(best, upper);
+            for &k in kids.iter().skip(1) {
+                let key = self.endpoint_key(k, upper);
+                let improves = if want_max { key > best_key } else { key < best_key };
+                if improves || (key == best_key && k < best) {
+                    best = k;
+                    best_key = key;
+                }
+            }
+            cur = best;
+        }
+    }
+
+    fn endpoint_key(&self, v: u32, upper: bool) -> f64 {
+        match self.nodes.get(&v) {
+            None => {
+                if upper {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                }
+            }
+            Some(_) => self.endpoint(v, upper),
+        }
+    }
+
+    fn sample_leaf(&mut self, leaf: u32, path: &[u32], rng: &mut Xs) {
+        let y = self.tree.slow_sample(leaf, rng);
+        let (sigma, delta_v) = (SIGMA, self.delta_v());
+        self.nodes.get_mut(&leaf).expect("leaf revealed")
+            .interval.observe_slow(y, sigma, delta_v);
+        self.samples += 1;
+        // Bottom-up Eq. 6 refresh along the sampled path only. Unrevealed
+        // siblings contribute the neutral sentinel (−∞, +∞) — they widen the
+        // fold exactly as the descent's optimistic rule expects.
+        for &v in path.iter().rev().skip(1) {
+            let kind = self.nodes[&v].kind;
+            let kids = self.nodes[&v].kids.clone();
+            let mut pairs = ArrayVec::<(f64, f64), MAX_CHILDREN>::new();
+            for &k in kids.iter() {
+                let pair = match self.nodes.get(&k) {
+                    Some(n) => n.interval.effective(),
+                    None => (f64::NEG_INFINITY, f64::INFINITY),
+                };
+                let _ = pairs.try_push(pair);
+            }
+            if !pairs.is_empty() {
+                self.nodes.get_mut(&v).expect("path node")
+                    .interval.set_child_backup(kind, pairs.as_slice());
+            }
+        }
+    }
+}
+
 fn bai_mcts(tree: &BenchTree, rng: &mut Xs) -> (u32, u64, bool) {
-    let mut s = UctSearch::new(tree);
-    let k = tree.b;
-    // (handle, n, m-higher) of the leader and the challenger + their radii,
-    // or None until every arm has ≥1 sample.
-    type Arm = (u32, u32, f64);
-    type LucbPick = Option<(Arm, f64, Arm, f64)>;
-    let lucb = |arms: &[Arm], t: u64| -> LucbPick {
-        if !arms.iter().all(|&(_, n, _)| n > 0) {
-            return None;
-        }
-        let lnd = (2.0 * k as f64 * t as f64 / DELTA).ln();
-        let rad = |n: u32| (lnd / f64::from(2 * n)).sqrt();
-        let mut leader = arms[0];
-        for &a in arms {
-            if a.2 - rad(a.1) > leader.2 - rad(leader.1) {
-                leader = a;
-            }
-        }
-        let mut chal: Option<(u32, u32, f64)> = None;
-        for &a in arms {
-            if a.0 == leader.0 {
-                continue;
-            }
-            if chal.is_none_or(|c| a.2 + rad(a.1) > c.2 + rad(c.1)) {
-                chal = Some(a);
-            }
-        }
-        let c = chal?;
-        Some((leader, rad(leader.1), c, rad(c.1)))
-    };
-    let mut t: u64 = 0;
+    let mut s = LucbSearch::new(tree);
+    let b = tree.b;
+    let arms: Vec<u32> = (1..=b as u32).collect();
+    for &a in &arms {
+        s.reveal(a);
+    }
+    let mut round: u64 = 0;
     loop {
-        let arms = s.arms();
-        if let Some((l, lr, c, cr)) = lucb(&arms, t)
-            && l.2 - lr >= c.2 + cr - f64::from(EPSILON)
-        {
-            return (l.0, s.samples, true);
+        let leader = arms
+            .iter()
+            .copied()
+            .reduce(|a, c| {
+                let la = s.endpoint(a, false);
+                let lc = s.endpoint(c, false);
+                if lc > la || (lc == la && c < a) { c } else { a }
+            })
+            .expect("b >= 1");
+        let (leader_l, _) = s.bounds(leader);
+        let chal_u = arms
+            .iter()
+            .filter(|&&a| a != leader)
+            .map(|&a| s.endpoint(a, true))
+            .fold(f64::NEG_INFINITY, f64::max);
+        if leader_l >= chal_u - f64::from(EPSILON) {
+            return (leader, s.samples, true);
         }
         if s.samples >= BAI_SAMPLE_CAP {
-            return (s.pick_best(), s.samples, false);
+            return (leader, s.samples, false);
         }
-        let target = if (t as usize) < k {
-            arms[t as usize].0
+        // Alternate: tighten the leader's L chain, then the challenger's U
+        // chain (the two endpoints the stop rule reads).
+        let (target, upper) = if round.is_multiple_of(2) {
+            (leader, false)
         } else {
-            let (l, _, c, _) = lucb(&arms, t).expect("arms all seen past round k");
-            if t % 2 == 1 {
-                l.0
-            } else {
-                c.0
-            }
+            let challenger = arms
+                .iter()
+                .copied()
+                .filter(|&a| a != leader)
+                .reduce(|a, c| {
+                    let ua = s.endpoint(a, true);
+                    let uc = s.endpoint(c, true);
+                    if uc > ua || (uc == ua && c < a) { c } else { a }
+                })
+                .expect("b >= 2 here — the stop would have fired over a single arm");
+            (challenger, true)
         };
-        s.descend_and_sample(target, rng);
-        t += 1;
+        let (leaf, path) = s.descend(target, upper);
+        s.sample_leaf(leaf, &path, rng);
+        round += 1;
     }
 }
 
