@@ -82,8 +82,8 @@
 
 use arrayvec::ArrayVec;
 use katgpt_core::two_fidelity_bai::{
-    two_fidelity_search, Cost, MinimaxSpace, NodeInterval, NodeKind, RngCore, SearchConfig,
-    TwoFidelityResult, MAX_CHILDREN, NODE_CAP,
+    two_fidelity_search, Cost, MinimaxSpace, NodeInterval, NodeKind, NodeStat, RngCore,
+    SearchConfig, TwoFidelityResult, MAX_CHILDREN, NODE_CAP,
 };
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -759,7 +759,7 @@ fn slow_only(tree: &BenchTree, rng: &mut Xs) -> (u32, u64) {
     ((1 + best) as u32, tree.b as u64 * m as u64 * n_per)
 }
 
-// ─── 2FFS runner ─────────────────────────────────────────────────────────────
+// ─── 2FFS runner ─────────────────────────────────────────────────────────────────
 
 fn run_2ffs(tree: &BenchTree, seed: u64) -> TwoFidelityResult {
     let config = SearchConfig {
@@ -768,9 +768,85 @@ fn run_2ffs(tree: &BenchTree, seed: u64) -> TwoFidelityResult {
         slow_cost: SLOW_COST,
         node_cap: NODE_CAP,
         sigma: SIGMA,
+        trace_nodes: std::env::var("B615_2FFS_TRACE").is_ok(),
     };
     let mut rng = Xs(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0xB10C));
     two_fidelity_search(tree, 0, &config, &mut rng)
+}
+
+/// Issue 916 cause-(b) attribution dump: aggregate the per-node ledger over
+/// all trees at the setting — samples by depth, the top consumers, and the
+/// width-target distribution the recursion was driving nodes toward.
+fn dump_2ffs_trace(results: &[TwoFidelityResult], d: u8, b: u8) {
+    let mut by_depth: std::collections::BTreeMap<u8, (u64, u64)> = Default::default(); // (nodes, samples)
+    let mut targets: Vec<(f64, u64)> = Vec::new(); // (target_width, samples) rows
+    let mut total_nodes = 0u64;
+    let mut total_samples = 0u64;
+    for r in results {
+        for st in &r.node_stats {
+            total_nodes += 1;
+            total_samples += st.slow_n;
+            let e = by_depth.entry(st.depth).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += st.slow_n;
+            targets.push((st.target_width, st.slow_n));
+        }
+    }
+    eprintln!(
+        "      TRACE d{d}b{b}: {total_nodes} sampled nodes / {total_samples} slow samples"
+    );
+    for (depth, (nodes, samples)) in &by_depth {
+        eprintln!(
+            "        depth {depth:>2}: {nodes:>5} nodes {samples:>8} samples ({}%)",
+            100 * samples / total_samples.max(1)
+        );
+    }
+    // width-target histogram (log2 buckets of ρ/2)
+    targets.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bucket: (i32, u64, f64) = (i32::MIN, 0, 0.0); // (log2 bucket, samples, width sum)
+    let mut buckets: Vec<(i32, u64, f64)> = Vec::new();
+    for (w, n) in &targets {
+        let bkt = if *w <= 0.0 {
+            i32::MIN
+        } else {
+            (*w).log2().floor() as i32
+        };
+        if bkt == bucket.0 {
+            bucket.1 += n;
+            bucket.2 += w;
+        } else {
+            if bucket.1 > 0 {
+                buckets.push(bucket);
+            }
+            bucket = (bkt, *n, *w);
+        }
+    }
+    if bucket.1 > 0 {
+        buckets.push(bucket);
+    }
+    for (bkt, n, wsum) in &buckets {
+        let label = if *bkt == i32::MIN {
+            "latched".to_string()
+        } else {
+            format!("ρ/2 ∈ [2^{bkt}, 2^{})", bkt + 1)
+        };
+        eprintln!(
+            "        target {label:<22}: {n:>8} samples (mean width {:.5})",
+            wsum / *n as f64
+        );
+    }
+    // top-8 consumers
+    let mut top: Vec<(u64, u32, u8, f64)> = Vec::new();
+    for r in results {
+        for st in r.node_stats.iter().take(4) {
+            top.push((st.slow_n, st.node, st.depth, st.target_width));
+        }
+    }
+    top.sort_by(|a, b| b.0.cmp(&a.0));
+    top.truncate(8);
+    for (n, node, depth, w) in top {
+        eprintln!("        top node {node} (depth {depth}): {n} samples, target width {w:.5}");
+    }
 }
 
 // ─── Stats: paired LB95 (Bench 905 protocol) + Clopper–Pearson upper bound ──
@@ -975,6 +1051,8 @@ fn run_setting(d: u8, b: usize, trees: usize) -> SettingResult {
         slow_cost: 0.0,
         flipped_trees: 0,
     };
+    let tracing = std::env::var("B615_2FFS_TRACE").is_ok();
+    let mut trace_pool: Vec<Vec<NodeStat>> = Vec::new();
     for t in 0..trees {
         let tree = BenchTree::generate(d, b, 0x615_0000_u64 + t as u64, NOISE_AMP);
         let (best, best_v) = tree.true_best();
@@ -983,6 +1061,7 @@ fn run_setting(d: u8, b: usize, trees: usize) -> SettingResult {
         }
         // 2FFS
         let res = run_2ffs(&tree, 1_000 + t as u64);
+        trace_pool.push(res.node_stats);
         if res.certified {
             r.f2_cert_ok += 1;
         }
@@ -1058,6 +1137,19 @@ fn run_setting(d: u8, b: usize, trees: usize) -> SettingResult {
             r.slow_errs += 1;
         }
         r.slow_cost += s_cost as f64;
+    }
+    if tracing {
+        let pool: Vec<TwoFidelityResult> = trace_pool
+            .into_iter()
+            .map(|stats| TwoFidelityResult {
+                best_action: 0,
+                cost: Cost::default(),
+                certified: false,
+                root_intervals: Vec::new(),
+                node_stats: stats,
+            })
+            .collect();
+        dump_2ffs_trace(&pool, d, b as u8);
     }
     r
 }

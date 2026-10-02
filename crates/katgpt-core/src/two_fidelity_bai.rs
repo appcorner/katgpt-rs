@@ -351,6 +351,12 @@ pub struct SearchConfig {
     pub node_cap: u32,
     /// Slow-oracle sub-Gaussian parameter (consumer-declared, paper Assump. 2).
     pub sigma: f64,
+    /// Per-node sample-accounting trace (Issue 916 cause-(b) measurement).
+    /// Pure observation: when set, [`TwoFidelityResult::node_stats`] carries
+    /// one row per sampled node at search end. Never affects the search
+    /// (no allocation, no stop-rule, no confidence change), so this is not
+    /// a confidence-allocation knob and needs no union-proof ceremony.
+    pub trace_nodes: bool,
 }
 
 impl SearchConfig {
@@ -397,6 +403,28 @@ pub struct TwoFidelityResult {
     pub certified: bool,
     /// Root children's effective intervals at stop (the certificate body).
     pub root_intervals: Vec<(u32, f64, f64)>,
+    /// Per-node sample accounting at stop — empty unless
+    /// [`SearchConfig::trace_nodes`] (Issue 916 cause-(b) measurement; the
+    /// attribution question is which nodes consumed the slow budget and at
+    /// what width targets, vs the paper's Figure/Table decomposition).
+    pub node_stats: Vec<NodeStat>,
+}
+
+/// One node's slow-sample ledger row at search end (tracing only).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeStat {
+    pub node: u32,
+    pub kind: NodeKind,
+    pub depth: u8,
+    /// Slow samples this node received (single-sample work units).
+    pub slow_n: u64,
+    /// Latched scale bitmasks per side (bit `k` of side `s`).
+    pub done: [u64; 2],
+    /// Effective interval width at stop.
+    pub final_width: f64,
+    /// The width target the node was last being driven toward
+    /// (`ρ_k / 2` at its smallest unresolved scale; 0.0 when fully latched).
+    pub target_width: f64,
 }
 
 /// The interval side a resolution refines (paper's per-side certificates:
@@ -434,6 +462,9 @@ struct NodeState {
     /// Cumulative recursive-route spend at this node, unified cost units
     /// (fast = 1, slow = `c`). Compared against the Eq. 7 race budget.
     rec_spend: f64,
+    /// Slow samples received (Issue 916 accounting trace; unconditional
+    /// one-add per sample — samples dominate the cost, the counter is noise).
+    slow_n: u64,
 }
 
 /// Eq. 7 race budget for the recursive route at `(v, k)`: zero when the fast
@@ -529,6 +560,7 @@ pub fn two_fidelity_search<S: MinimaxSpace, R: RngCore>(
             expanded: false,
             done: [0; 2],
             rec_spend: 0.0,
+            slow_n: 0,
         },
     );
     let root_children = search.expand(root);
@@ -652,6 +684,7 @@ impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
                     expanded: false,
                     done: [0; 2],
                     rec_spend: 0.0,
+                    slow_n: 0,
                 },
             );
         }
@@ -746,6 +779,7 @@ impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
         let (sigma, delta_v) = (self.config.sigma, self.delta_v());
         let sample = self.space.slow_sample(node, self.rng);
         self.cost.slow += 1;
+        self.state(node).slow_n += 1;
         self.state(node).interval.observe_slow(sample, sigma, delta_v);
         f64::from(self.config.slow_cost)
     }
@@ -803,7 +837,8 @@ impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
     }
 
     /// Freeze the result: leader (argmax L, tie → lowest handle), the cost
-    /// ledger, and the root children's effective intervals.
+    /// ledger, and the root children's effective intervals. When tracing,
+    /// emit the per-node sample ledger (Issue 916 cause-(b) measurement).
     fn finish(&self, root_children: ArrayVec<u32, MAX_CHILDREN>, certified: bool) -> TwoFidelityResult {
         let best_action = self.pick_extreme(root_children.as_slice(), Side::Lower, true);
         let mut root_intervals = Vec::with_capacity(root_children.len());
@@ -811,11 +846,44 @@ impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
             let (lo, hi) = self.states[child].interval.effective();
             root_intervals.push((*child, lo, hi));
         }
+        let node_stats = if self.config.trace_nodes {
+            let rho0 = self.rho0;
+            let mut rows: Vec<NodeStat> = self
+                .states
+                .iter()
+                .filter(|(_, st)| st.slow_n > 0)
+                .map(|(&node, st)| {
+                    let k_unresolved = st.done[0].trailing_ones().min(st.done[1].trailing_ones());
+                    let target = if k_unresolved >= 64 {
+                        0.0
+                    } else {
+                        rho0 * (-(f64::from(k_unresolved))).exp2() / 2.0
+                    };
+                    NodeStat {
+                        node,
+                        kind: st.kind,
+                        depth: st.depth,
+                        slow_n: st.slow_n,
+                        done: st.done,
+                        final_width: {
+                            let (lo, hi) = st.interval.effective();
+                            hi - lo
+                        },
+                        target_width: target,
+                    }
+                })
+                .collect();
+            rows.sort_by(|a, b| b.slow_n.cmp(&a.slow_n).then(a.node.cmp(&b.node)));
+            rows
+        } else {
+            Vec::new()
+        };
         TwoFidelityResult {
             best_action,
             cost: self.cost,
             certified,
             root_intervals,
+            node_stats,
         }
     }
 }
@@ -972,6 +1040,7 @@ mod tests {
             slow_cost: 4.0,
             node_cap: NODE_CAP,
             sigma: 0.5,
+            trace_nodes: false,
         };
         let per = cfg.delta_for_node();
         assert!((per * f64::from(NODE_CAP) - 0.05).abs() < 1e-12);
@@ -1097,6 +1166,7 @@ mod tests {
             slow_cost: 4.0,
             node_cap: NODE_CAP,
             sigma,
+            trace_nodes: false,
         }
     }
 
