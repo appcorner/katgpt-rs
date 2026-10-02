@@ -13,7 +13,7 @@ Hadamard not special); `5id` == arm 1 exactly on all 12 checkpoints (the
 insertion harness proven). No trained-with-mixing consumer exists in the stack
 (Research 600 §3/§4) ⇒ the pre-registered close clause fired. The construction
 vocabulary (`replication()` / `sign_flip_pair()` / `hadamard()`) remains in
-Research 600 §5 as expressivity witnesses only. Issue 606 arm 4 (does training
+Research 600 §5 as expressivity witnesses only. riir-train Issue 606 arm 4 (does training
 AROUND a fixed layout help?) stays open as a training-side question — a strong
 positive there plus a materialized consumer is a fresh filing, not a reopen.
 
