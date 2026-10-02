@@ -214,6 +214,16 @@ pub fn forward_looped<'a>(
     #[cfg(feature = "cadence_gate")] residual_exit: Option<
         &mut katgpt_core::convergence_cadence::LoopResidualExit,
     >,
+    // Plan 617 T1.3 — LoopCD recurrent-depth contrast guidance. `None` =
+    // bit-identical to pre-Plan-617 behavior (the `cadence_gate` precedent:
+    // the parameter slot exists only when the feature is on, so callers
+    // compiled without `loop_guidance` don't pass it). `Some(g)` = capture
+    // h_k at the completed `g.config.ref_loop` iteration and apply the
+    // strong−weak contrast to whichever prediction is FINALLY decoded
+    // (exit-iteration or loop-R) — the exit family above operates on
+    // UNGUIDED per-iteration readouts and composes with this.
+    #[cfg(feature = "loop_guidance")]
+    guidance: Option<&mut super::loop_guidance::LoopGuidance>,
 ) -> &'a mut [f32] {
     use crate::types::HybridPattern;
 
@@ -316,6 +326,23 @@ pub fn forward_looped<'a>(
     // Issue 731 T1 — the residual-exit probe is reborrowed per use.
     #[cfg(feature = "cadence_gate")]
     let mut residual_exit = residual_exit;
+
+    // Plan 617 T1.3 — guidance is reborrowed per use and self-resets per
+    // call (the capture flag clears here, so a LoopGuidance reused across
+    // decode steps needs no caller bookkeeping). `guidance_active` is the
+    // hoisted hot-loop predicate: `false` in the unarmed/None posture, so
+    // the per-iteration capture branch is predicted-not-taken and the
+    // no-guidance path stays bit-identical to pre-Plan-617.
+    #[cfg(feature = "loop_guidance")]
+    let mut guidance = guidance;
+    #[cfg(feature = "loop_guidance")]
+    let guidance_armed = guidance.as_ref().is_some_and(|g| g.config.is_armed());
+    #[cfg(feature = "loop_guidance")]
+    let guidance_ref_loop = guidance.as_ref().map_or(0, |g| g.config.ref_loop);
+    #[cfg(feature = "loop_guidance")]
+    if let Some(g) = guidance.as_deref_mut() {
+        g.begin_step();
+    }
 
     // 2. Outer loop: T passes over all layers
     for tau in 0..loop_count {
@@ -580,6 +607,22 @@ pub fn forward_looped<'a>(
             ctx.loop_anchor[..n].copy_from_slice(&ctx.x[..n]);
         }
 
+        // Plan 617 T1.1 — reference capture at the completed `ref_loop`
+        // iteration. Placed BEFORE every exit family (margin gate / halter /
+        // cadence) so a step that exits AT the capture iteration still gets
+        // its reference — the apply site at the readout needs h_k whenever
+        // the loop reached `ref_loop`, regardless of where it stopped after.
+        // Logit mode pays the ONE extra scratch head pass here; hidden mode
+        // is one copy. Skipped entirely when no guidance is passed or the
+        // config is the ω=0 structural no-op (`guidance_armed == false`).
+        #[cfg(feature = "loop_guidance")]
+        if guidance_armed
+            && tau + 1 == guidance_ref_loop
+            && let Some(g) = guidance.as_deref_mut()
+        {
+            g.capture_reference(&ctx.x[..n], &weights.lm_head, config.vocab_size, n);
+        }
+
         // Plan 283 T2.2 — AdvantageMarginGate dead-compute check.
         // Only active when `weight_shared_advantage_gate` is enabled AND the
         // caller passed `Some(gate)`. When `None`, this block is compiled out
@@ -824,6 +867,22 @@ pub fn forward_looped<'a>(
     }
 
     // Snapshot hidden state
+    // Plan 617 T1.2 — hidden mode: the contrast is blended INTO the carried
+    // state BEFORE the snapshot + head, so `hidden_state` records h′ (the
+    // state that produced the decode) and the head pass count stays ONE.
+    // Logit mode leaves ctx.x untouched (its contrast operates on ctx.logits
+    // below, after the head).
+    #[cfg(feature = "loop_guidance")]
+    {
+        if let Some(g) = guidance.as_deref_mut() {
+            let hidden = if g.config.mode == super::loop_guidance::GuidanceMode::Hidden {
+                Some(&mut ctx.x[..n])
+            } else {
+                None
+            };
+            g.apply_at_readout(hidden, &mut []);
+        }
+    }
     ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
 
     // LM Head
@@ -834,6 +893,22 @@ pub fn forward_looped<'a>(
         config.vocab_size,
         n,
     );
+
+    // Plan 617 T1.2 — logit mode: z′ = z_R + ω·(z_R − z_k) on the final
+    // readout (the in-step Eq-4 margin reads these pre-guidance logits).
+    // Hidden mode: record this step's output margin for the next step's
+    // adaptive gate (the one-head-pass law means h_R is never read out).
+    #[cfg(feature = "loop_guidance")]
+    {
+        // Tail use: moving the Option is fine here (no later access).
+        if let Some(g) = guidance {
+            if g.config.mode == super::loop_guidance::GuidanceMode::Logits {
+                g.apply_at_readout(None, &mut ctx.logits);
+            } else {
+                g.record_output_margin(&ctx.logits);
+            }
+        }
+    }
 
     // ── Sleep consolidation hook (Plan 154: eviction boundary) ─────
     // After the forward pass, if the KV cache is full, consolidate

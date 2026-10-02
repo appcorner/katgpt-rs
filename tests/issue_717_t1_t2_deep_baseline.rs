@@ -84,7 +84,9 @@ fn run_deep(
         run.as_deref_mut(),
         #[cfg(feature = "cadence_gate")]
         None, // Issue 731: residual-exit probe — None = bit-identical baseline
-    );
+    #[cfg(feature = "loop_guidance")]
+        None, // Plan 617: LoopCD guidance - None = bit-identical baseline
+        );
     let logits = logits.to_vec();
     // Final carried state: `ctx.x` post-loop (mirrored into
     // `ctx.hidden_state` at the readout site). Max-abs-scaled norm —

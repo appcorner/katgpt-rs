@@ -129,7 +129,9 @@ fn run_deep(
         run,
         #[cfg(feature = "cadence_gate")]
         None, // Issue 731: residual-exit probe — None = bit-identical baseline
-    );
+    #[cfg(feature = "loop_guidance")]
+        None, // Plan 617: LoopCD guidance - None = bit-identical baseline
+        );
     let logits = logits.to_vec();
     let final_norm = robust_norm(&ctx.x[..config.n_embd]);
     (logits, final_norm)
@@ -481,7 +483,9 @@ fn g4_alloc_free_stabilization_hot_loop() {
         Some(&mut run),
         #[cfg(feature = "cadence_gate")]
         None, // Issue 731: residual-exit probe — None = bit-identical baseline
-    );
+    #[cfg(feature = "loop_guidance")]
+        None, // Plan 617: LoopCD guidance - None = bit-identical baseline
+        );
 
     reset_alloc_stats();
     for _ in 0..8 {
@@ -506,7 +510,9 @@ fn g4_alloc_free_stabilization_hot_loop() {
             Some(&mut run),
             #[cfg(feature = "cadence_gate")]
             None, // Issue 731: residual-exit probe — None = bit-identical baseline
-        );
+        #[cfg(feature = "loop_guidance")]
+            None, // Plan 617: LoopCD guidance - None = bit-identical baseline
+            );
     }
     let (count, bytes) = get_alloc_stats();
     assert_eq!(

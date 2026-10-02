@@ -93,7 +93,9 @@ fn run(
         None,
         None,  // Issue 717: deep_run — None = bit-identical baseline
         probe, // Issue 731 T1: the residual-exit probe (cadence_gate builds)
-    );
+    #[cfg(feature = "loop_guidance")]
+        None, // Plan 617: LoopCD guidance - None = bit-identical baseline
+        );
     logits.to_vec()
 }
 

@@ -3659,6 +3659,25 @@ name = "probe_guidance_alloc_gate"
 path = "tests/probe_guidance_alloc_gate.rs"
 required-features = ["probe_guidance"]
 
+# Plan 617 T1.4/T1.5 — LoopCD guidance unit gates + the zero-alloc pin.
+# required-features keeps the whole-file-#![cfg] target from printing a
+# green `ok. 0 passed` when invoked feature-off (the repo-birth gate rule).
+# The gates exercise the weight-shared looped forward, hence the lt2_looped
+# second leg.
+[[test]]
+name = "loop_guidance_gates"
+path = "tests/loop_guidance_gates.rs"
+required-features = ["loop_guidance", "lt2_looped"]
+
+# Plan 617 T1.5 — the zero-alloc pin. Own target (own process): a multi-test
+# target cannot hold this pin — sibling tests run on parallel threads and
+# bump the same process-wide counting allocator (the
+# probe_guidance_alloc_gate precedent).
+[[test]]
+name = "loop_guidance_alloc_gate"
+path = "tests/loop_guidance_alloc_gate.rs"
+required-features = ["loop_guidance", "lt2_looped"]
+
 # ── Plan 607 — the modelless game-decision lane ────────────────────────
 # tetris_01_state_enum (T4a) is ungated (pure std + serde deps). The arena
 # (T4) consumes the opt-in state_option_scoring primitive, so it carries

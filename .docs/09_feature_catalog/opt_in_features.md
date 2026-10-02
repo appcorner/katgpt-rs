@@ -1961,6 +1961,7 @@ A consolidated section for standalone opt-in features with their own plans but n
 |---|---|---|
 | `dirichlet_energy` | 149 | Dirichlet Energy structural alignment diagnostic |
 | `gain_cost_halt` | 304 | Gain/Cost Loop Halting Primitive — per-loop halting kernel. GOAT G1-G5 ALL PASS. Stays opt-in at katgpt-core leaf; production wiring is riir-ai civ-side. |
+| `loop_guidance` | 617 | LoopCD recurrent-depth contrast guidance — the probe_guidance combine with its weak side re-sourced to a completed loop iteration k (arXiv:2610.02185); adaptive margin gate Eq 4; hidden mode one-head-pass. Shares the `contrast_combine` kernel with 865 (T1.2 one-home extraction). **ADJUDICATION PENDING** — the GOAT bench (non-saturated looped fixture, non-degeneracy asserts committed first) decides; the class is 0-for-2 (Benches 847+850). Promotion blocked pending a production looped consumer. |
 | `smear_classifier` | 298 | SmearClassifier — ternary latent-mass distribution classifier. GOAT G1/G2/G3 ALL PASS. Stays opt-in (G2 evidence synthetic). |
 | `self_advantage_gate` | 283 | Self-advantage recursion gate for HLA reconstruction |
 | `recursion_logits` | 283 | RecursionLogits opt-in trait — pre/post recursion logits exposure |
