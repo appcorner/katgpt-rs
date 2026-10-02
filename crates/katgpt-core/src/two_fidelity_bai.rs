@@ -10,12 +10,16 @@
 //! fast expansion against MCTS-style slow certification until the root action
 //! is certified ε-optimal with confidence 1−δ.
 //!
-//! This module currently ships the Phase-1 foundations (plan T1.1–T1.4 +
-//! T1.7): the [`MinimaxSpace`] consumer trait, the per-node interval state
-//! with minimax backup (paper Eqs. 4/6, Lemmas 2.3/B.2), the time-uniform
-//! sub-Gaussian radius [`beta`], the confidence allocation, and the result
-//! type. The root leader/challenger loop with race budgets (plan T1.5/T1.6)
-//! lands next.
+//! This module ships the Phase-1 search (plan T1.1–T1.7): the [`MinimaxSpace`]
+//! consumer trait, the per-node interval state with minimax backup (paper
+//! Eqs. 4/6, Lemmas 2.3/B.2), the time-uniform sub-Gaussian radius [`beta`],
+//! the confidence allocation, the result type, and the root
+//! leader/challenger loop with per-(node, side, scale) resolution (plan
+//! T1.5/T1.6): [`two_fidelity_search`] races the local slow-sample route
+//! against the budgeted recursive route (Eq. 7) under latched `Done_s(v,k)`
+//! bitflags, with deterministic tie-breaks, the empty-intersection guard
+//! (paper B.3 convention: terminate + default action, never loop), and the
+//! ρ₀ = 0 early exit.
 //!
 //! Pure query-allocation + interval bookkeeping — zero gradient descent, zero
 //! weights, zero deps beyond `arrayvec`. Opt-in feature `two_fidelity_bai`;
@@ -23,6 +27,7 @@
 //! this fills the empty *certified-search* slot).
 
 use arrayvec::ArrayVec;
+use std::collections::HashMap;
 
 /// Upper bound on tree nodes the search state pre-allocates (the `mcts.rs`
 /// `MAX_TREE_SIZE` precedent). The confidence allocation
@@ -360,6 +365,427 @@ pub struct TwoFidelityResult {
     pub root_intervals: Vec<(u32, f64, f64)>,
 }
 
+/// The interval side a resolution refines (paper's per-side certificates:
+/// `L` = lower endpoint, `U` = upper endpoint).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// Lower endpoint `L_v` — the leader's side at the root.
+    Lower,
+    /// Upper endpoint `U_v` — the challenger's side at the root.
+    Upper,
+}
+
+impl Side {
+    fn index(self) -> usize {
+        match self {
+            Side::Lower => 0,
+            Side::Upper => 1,
+        }
+    }
+}
+
+/// Per-node search bookkeeping (tree storage stays in the consumer's
+/// [`MinimaxSpace`] — the search holds only intervals, latches, and the
+/// revealed child list).
+struct NodeState {
+    interval: NodeInterval,
+    kind: NodeKind,
+    depth: u8,
+    children: ArrayVec<u32, MAX_CHILDREN>,
+    expanded: bool,
+    /// Latched `Done_s(v, k)` bitflags — bit `k` of `done[s]` says side `s`
+    /// of this node is certified at scale `ρ_k`. Latching is monotone
+    /// (zero rework per node/side/scale, paper §3.2).
+    done: [u64; 2],
+    /// Cumulative recursive-route spend at this node, unified cost units
+    /// (fast = 1, slow = `c`). Compared against the Eq. 7 race budget.
+    rec_spend: f64,
+}
+
+/// Eq. 7 race budget for the recursive route at `(v, k)`: zero when the fast
+/// envelope is already within a quarter of the scale (recursion cannot buy
+/// meaningfully tighter children), else `c · m_v(ρ_k)` — the local route's
+/// cost — so the recursive route may spend up to `α_h` times what local
+/// certification would have cost.
+fn gamma_v(bias: f64, rho: f64, slow_cost: f32, local_samples: u32) -> f64 {
+    if bias <= rho / 4.0 {
+        0.0
+    } else {
+        f64::from(slow_cost) * f64::from(local_samples)
+    }
+}
+
+/// `m_v(ρ)`: the smallest sample count whose slow-interval width `2β(n)`
+/// certifies side width `width_target` (β is stage-constant, so the scan
+/// walks stage starts; ~80 stages to β ≈ 0 for any δ).
+fn m_samples(width_target: f64, delta_v: f64, sigma: f64) -> u32 {
+    debug_assert!(width_target.is_finite() && width_target > 0.0);
+    let mut k: u32 = 1;
+    loop {
+        let n = stage_start(k);
+        if 2.0 * beta(n, delta_v, sigma) <= width_target {
+            return n;
+        }
+        k += 1;
+        if k > 200 {
+            // Unreachable for honest widths (β → 0); the caller's iteration
+            // cap is the belt-and-braces backstop.
+            return u32::MAX;
+        }
+    }
+}
+
+/// The certified two-fidelity search (plan T1.5/T1.6; paper Algorithm 1).
+///
+/// Expands the root (fast-querying its children — root is a Max node per
+/// paper Definition 2.1), then loops: leader = argmax lower endpoint,
+/// challenger = argmax upper endpoint among the rest; stop when
+/// `L_â ≥ max_{a≠â} U_a − ε` (ε-stop). Each unresolved iteration refines the
+/// *coarser* of (leader's L-side, challenger's U-side) by one work unit via
+/// the budgeted local-vs-recursive race. PAC soundness rides only on
+/// interval validity (honest envelope + time-uniform slow CIs, union δ) and
+/// the stop rule — the race budget is a route-selection heuristic and never
+/// gates correctness; `rho_0 = 0` (all root intervals exact) exits through
+/// the stop rule on the first pass, and the empty-intersection guard
+/// (detectable `E_δ` violation) terminates with `certified = false` and the
+/// current leader as the default action (paper B.3 convention).
+///
+/// Config validation is asserted here (`ε ≥ 0` finite, `δ ∈ (0,1)`, positive
+/// finite `c`/`σ`, `1 ≤ node_cap ≤ NODE_CAP`).
+pub fn two_fidelity_search<S: MinimaxSpace, R: RngCore>(
+    space: &S,
+    root: u32,
+    config: &SearchConfig,
+    rng: &mut R,
+) -> TwoFidelityResult {
+    assert!(
+        config.epsilon.is_finite() && config.epsilon >= 0.0,
+        "epsilon must be finite and >= 0"
+    );
+    assert!(config.delta > 0.0 && config.delta < 1.0, "delta in (0, 1)");
+    assert!(
+        config.slow_cost.is_finite() && config.slow_cost > 0.0,
+        "slow_cost must be finite and > 0"
+    );
+    assert!(config.sigma.is_finite() && config.sigma > 0.0, "sigma > 0");
+    assert!(
+        config.node_cap >= 1 && config.node_cap <= NODE_CAP,
+        "node_cap in [1, NODE_CAP]"
+    );
+    assert_eq!(space.kind(root), NodeKind::Max, "root is a Max node");
+
+    let mut search = Searcher {
+        space,
+        config,
+        rng,
+        states: HashMap::with_capacity(1024),
+        rho0: 0.0,
+        cost: Cost::default(),
+    };
+    // The root's own bookkeeping node (its interval is never read — only
+    // kind/depth for expansion bookkeeping).
+    let root_depth = space.remaining_depth(root);
+    search.states.insert(
+        root,
+        NodeState {
+            interval: NodeInterval::from_fast(0.0, 0.0),
+            kind: NodeKind::Max,
+            depth: root_depth,
+            children: ArrayVec::new(),
+            expanded: false,
+            done: [0; 2],
+            rec_spend: 0.0,
+        },
+    );
+    let root_children = search.expand(root);
+    assert!(!root_children.is_empty(), "root must expose >= 1 child");
+
+    // ρ_0 = widest root-child interval (paper §3.1); the dyadic ladder is
+    // ρ_k = ρ_0 · 2^-k. ρ_0 = 0 (all root intervals exact) is the T1.6 early
+    // exit — the first stop-rule pass below fires on exact points.
+    search.rho0 = root_children
+        .iter()
+        .map(|c| search.width_of(*c))
+        .fold(0.0_f64, f64::max);
+
+    let epsilon = f64::from(config.epsilon);
+    // Belt-and-braces only: every work unit shrinks an interval, expands a
+    // bounded node, or latches a scale, so the loop is finite on honest
+    // inputs (paper Thm 3.6); the cap turns pathological inputs into the
+    // B.3 default-action exit instead of a hang.
+    let max_iters = 64 * u64::from(config.node_cap);
+    let mut iters: u64 = 0;
+
+    loop {
+        // Guard first (T1.6): an empty effective interval at the root is a
+        // detectable E_δ violation — terminate + default action, certified
+        // = false. On honest oracles this never fires (every interval
+        // contains V* on E_δ, and max/min backups preserve containment).
+        if root_children
+            .iter()
+            .any(|c| search.is_empty(*c))
+        {
+            return search.finish(root_children, false);
+        }
+
+        // Leader = argmax L (tie → lowest handle); challenger's margin =
+        // max U over the rest.
+        let leader = search.pick_extreme(root_children.as_slice(), Side::Lower, true);
+        let leader_l = search.endpoint(leader, Side::Lower);
+        let challenger_u = root_children
+            .iter()
+            .filter(|c| **c != leader)
+            .map(|c| search.endpoint(*c, Side::Upper))
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        // ε-stop (paper §3.2): single-child roots stop here trivially.
+        if leader_l >= challenger_u - epsilon {
+            return search.finish(root_children, true);
+        }
+        if iters >= max_iters {
+            return search.finish(root_children, false);
+        }
+
+        // Refine the coarser unresolved side of the leader/challenger pair
+        // (tie → the leader's L-side, deterministic).
+        let challenger = search
+            .pick_extreme_excluding(root_children.as_slice(), Side::Upper, true, leader);
+        let target = if search.width_of(leader) >= search.width_of(challenger) {
+            (leader, Side::Lower)
+        } else {
+            (challenger, Side::Upper)
+        };
+        search.resolve_step(target.0, target.1);
+        iters += 1;
+    }
+}
+
+struct Searcher<'a, S: MinimaxSpace, R: RngCore> {
+    space: &'a S,
+    config: &'a SearchConfig,
+    rng: &'a mut R,
+    states: HashMap<u32, NodeState>,
+    rho0: f64,
+    cost: Cost,
+}
+
+impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
+    fn delta_v(&self) -> f64 {
+        self.config.delta_for_node()
+    }
+
+    fn state(&mut self, node: u32) -> &mut NodeState {
+        self.states.get_mut(&node).expect("node state exists")
+    }
+
+    fn width_of(&self, node: u32) -> f64 {
+        let (lo, hi) = self.states[&node].interval.effective();
+        hi - lo
+    }
+
+    fn endpoint(&self, node: u32, side: Side) -> f64 {
+        let (lo, hi) = self.states[&node].interval.effective();
+        match side {
+            Side::Lower => lo,
+            Side::Upper => hi,
+        }
+    }
+
+    fn is_empty(&self, node: u32) -> bool {
+        let (lo, hi) = self.states[&node].interval.effective();
+        lo > hi
+    }
+
+    /// Expand `node`: reveal + fast-query all children (b fast queries),
+    /// create their interval states, install the Eq. 6 backup. Returns the
+    /// children (root call) and charges `Cost.fast`.
+    fn expand(&mut self, node: u32) -> ArrayVec<u32, MAX_CHILDREN> {
+        let kind = self.state(node).kind;
+        let mut children = ArrayVec::new();
+        self.space.children_into(node, &mut children);
+        for &child in children.as_slice() {
+            let child_depth = self.space.remaining_depth(child);
+            let child_bias = self.space.bias_envelope(child_depth);
+            let fast = self.space.fast_value(child);
+            self.cost.fast += 1;
+            self.states.insert(
+                child,
+                NodeState {
+                    interval: NodeInterval::from_fast(fast, child_bias),
+                    kind: self.space.kind(child),
+                    depth: child_depth,
+                    children: ArrayVec::new(),
+                    expanded: false,
+                    done: [0; 2],
+                    rec_spend: 0.0,
+                },
+            );
+        }
+        let st = self.state(node);
+        st.children = children.clone();
+        st.expanded = true;
+        self.refresh_backup(node, kind);
+        children
+    }
+
+    fn refresh_backup(&mut self, node: u32, kind: NodeKind) {
+        let children = self.state(node).children.clone();
+        let mut pairs = ArrayVec::<(f64, f64), MAX_CHILDREN>::new();
+        for &child in children.as_slice() {
+            let (lo, hi) = self.states[&child].interval.effective();
+            let _ = pairs.try_push((lo, hi));
+        }
+        if !pairs.is_empty() {
+            self.state(node).interval.set_child_backup(kind, pairs.as_slice());
+        }
+    }
+
+    /// The live/blocking child for `(node, side)` — selector cases resolve
+    /// the endpoint witness; comparison cases the still-live extreme
+    /// (children outside the ρ_k/2 margin are discharged lazily by never
+    /// being picked). Ties → lowest handle; empty-effective children are
+    /// skipped (guard territory). Returns `None` when every child is empty
+    /// (the caller falls back to the local route — local reversibility).
+    fn blocking_child(&self, node: u32, side: Side) -> Option<u32> {
+        let st = self.states.get(&node)?;
+        let want_max = st.kind == NodeKind::Max;
+        let mut best: Option<u32> = None;
+        let mut best_key = 0.0_f64;
+        for &child in st.children.as_slice() {
+            if self.is_empty(child) {
+                continue;
+            }
+            let key = self.endpoint(child, side);
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    let improves = if want_max { key > best_key } else { key < best_key };
+                    improves || (key == best_key && child < b)
+                }
+            };
+            if better {
+                best = Some(child);
+                best_key = key;
+            }
+        }
+        best
+    }
+
+    /// Arg-extreme over `children` by effective endpoint (ties → lowest
+    /// handle). Root-loop selector for leader/challenger.
+    fn pick_extreme(&self, children: &[u32], side: Side, want_max: bool) -> u32 {
+        self.pick_extreme_excluding(children, side, want_max, u32::MAX)
+    }
+
+    fn pick_extreme_excluding(
+        &self,
+        children: &[u32],
+        side: Side,
+        want_max: bool,
+        exclude: u32,
+    ) -> u32 {
+        let mut best: Option<u32> = None;
+        let mut best_key = 0.0_f64;
+        for &child in children {
+            if child == exclude {
+                continue;
+            }
+            let key = self.endpoint(child, side);
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    let improves = if want_max { key > best_key } else { key < best_key };
+                    improves || (key == best_key && child < b)
+                }
+            };
+            if better {
+                best = Some(child);
+                best_key = key;
+            }
+        }
+        best.unwrap_or_else(|| children.first().copied().unwrap_or(exclude))
+    }
+
+    /// One local slow sample (the local route; always available — paper's
+    /// local reversibility). Returns the unified cost spent (`c`).
+    fn sample_local(&mut self, node: u32) -> f64 {
+        let (sigma, delta_v) = (self.config.sigma, self.delta_v());
+        let sample = self.space.slow_sample(node, self.rng);
+        self.cost.slow += 1;
+        self.state(node).interval.observe_slow(sample, sigma, delta_v);
+        f64::from(self.config.slow_cost)
+    }
+
+    /// One resolution work unit toward certifying `side` of `node` at the
+    /// smallest unresolved scale (T1.5). Returns the unified cost spent.
+    fn resolve_step(&mut self, node: u32, side: Side) -> f64 {
+        let s = side.index();
+        let (done_bits, depth, expanded) = {
+            let st = self.state(node);
+            (st.done[s], st.depth, st.expanded)
+        };
+        // Scale ladder: smallest unresolved k. A fully-latched ladder (all
+        // 64 scales) cannot certify finer — degrade to the local route; the
+        // root loop's cap remains the backstop.
+        let k = done_bits.trailing_ones();
+        if k >= 64 {
+            return self.sample_local(node);
+        }
+        let rho = self.rho0 * (-(f64::from(k))).exp2();
+
+        // Observable certificate: effective width within ρ_k/2 → latch.
+        if self.width_of(node) <= rho / 2.0 {
+            self.state(node).done[s] |= 1 << k;
+            return 0.0;
+        }
+
+        // Leaves have B(0) = 0 (recursion is structurally impossible and
+        // Eq. 7 returns Γ = 0): the local route is the only route.
+        if depth == 0 {
+            return self.sample_local(node);
+        }
+
+        // Eq. 7 race budget; recursive spend is tracked per node (v1
+        // simplification: cumulative across scales — conservative, and never
+        // correctness-bearing: both routes only tighten valid intervals).
+        let bias = f64::from(self.space.bias_envelope(depth));
+        let gamma = gamma_v(bias, rho, self.config.slow_cost, m_samples(rho / 2.0, self.delta_v(), self.config.sigma));
+        let budget = race_scale(depth) * gamma;
+        let spend = self.state(node).rec_spend;
+        if gamma > 0.0 && spend < budget {
+            if !expanded {
+                let children = self.expand(node);
+                self.state(node).rec_spend += f64::from(children.len() as u32);
+            }
+            if let Some(child) = self.blocking_child(node, side) {
+                let spent = self.resolve_step(child, side);
+                let kind = self.state(node).kind;
+                self.refresh_backup(node, kind);
+                self.state(node).rec_spend += spent;
+                return spent;
+            }
+        }
+        self.sample_local(node)
+    }
+
+    /// Freeze the result: leader (argmax L, tie → lowest handle), the cost
+    /// ledger, and the root children's effective intervals.
+    fn finish(&self, root_children: ArrayVec<u32, MAX_CHILDREN>, certified: bool) -> TwoFidelityResult {
+        let best_action = self.pick_extreme(root_children.as_slice(), Side::Lower, true);
+        let mut root_intervals = Vec::with_capacity(root_children.len());
+        for child in root_children.iter() {
+            let (lo, hi) = self.states[child].interval.effective();
+            root_intervals.push((*child, lo, hi));
+        }
+        TwoFidelityResult {
+            best_action,
+            cost: self.cost,
+            certified,
+            root_intervals,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +950,251 @@ mod tests {
         let c = Cost { fast: 100, slow: 7 };
         assert!((c.unified(4.0) - 128.0).abs() < 1e-12);
         assert_eq!(Cost::default().unified(3.0), 0.0);
+    }
+
+    // ── T1.5/T1.6: the root leader/challenger search ────────────────────
+
+    /// Hand-built minimax tree: linear node ids, node 0 = root (Max). True
+    /// leaf values are the slow means; `exact()` folds true minimax. The
+    /// envelope is `bias_scale · 2^-h` (nondecreasing in h, B(0) = 0 at
+    /// scale 0); slow noise is uniform ±`noise_amp` (sub-Gaussian parameter
+    /// `noise_amp/√3`, so a declared σ ≥ noise_amp is honest).
+    struct VecTree {
+        kind: Vec<NodeKind>,
+        depth: Vec<u8>,
+        children: Vec<Vec<u32>>,
+        fast: Vec<f32>,
+        slow: Vec<f32>,
+        bias_scale: f32,
+        noise_amp: f32,
+    }
+
+    impl VecTree {
+        fn new(bias_scale: f32, noise_amp: f32) -> Self {
+            Self {
+                kind: vec![NodeKind::Max],
+                depth: vec![0],
+                children: vec![Vec::new()],
+                fast: vec![0.0],
+                slow: vec![0.0],
+                bias_scale,
+                noise_amp,
+            }
+        }
+
+        fn push(&mut self, parent: u32, kind: NodeKind, depth: u8, fast: f32, slow: f32) -> u32 {
+            let id = self.kind.len() as u32;
+            self.kind.push(kind);
+            self.depth.push(depth);
+            self.children.push(Vec::new());
+            self.fast.push(fast);
+            self.slow.push(slow);
+            self.children[parent as usize].push(id);
+            id
+        }
+
+        fn exact(&self, node: u32) -> f32 {
+            match self.children[node as usize].as_slice() {
+                &[] => self.slow[node as usize],
+                kids => {
+                    let mut vals = kids.iter().map(|c| self.exact(*c));
+                    let first = vals.next().unwrap_or(0.0);
+                    match self.kind[node as usize] {
+                        NodeKind::Max => vals.fold(first, f32::max),
+                        NodeKind::Min => vals.fold(first, f32::min),
+                    }
+                }
+            }
+        }
+    }
+
+    impl MinimaxSpace for VecTree {
+        fn kind(&self, node: u32) -> NodeKind {
+            self.kind[node as usize]
+        }
+
+        fn remaining_depth(&self, node: u32) -> u8 {
+            self.depth[node as usize]
+        }
+
+        fn children_into(&self, node: u32, out: &mut ArrayVec<u32, MAX_CHILDREN>) {
+            for &c in &self.children[node as usize] {
+                out.push(c);
+            }
+        }
+
+        fn fast_value(&self, node: u32) -> f32 {
+            self.fast[node as usize]
+        }
+
+        fn bias_envelope(&self, remaining_depth: u8) -> f32 {
+            self.bias_scale * 2.0_f32.powi(-i32::from(remaining_depth))
+        }
+
+        fn slow_sample(&self, node: u32, rng: &mut impl RngCore) -> f32 {
+            self.slow[node as usize]
+                + ((rng.f64() - 0.5) * 2.0 * f64::from(self.noise_amp)) as f32
+        }
+    }
+
+    fn search_cfg(epsilon: f32, sigma: f64) -> SearchConfig {
+        SearchConfig {
+            epsilon,
+            delta: 0.05,
+            slow_cost: 4.0,
+            node_cap: NODE_CAP,
+            sigma,
+        }
+    }
+
+    #[test]
+    fn exact_fast_oracle_stops_on_rho0_zero_without_slow_samples() {
+        let mut t = VecTree::new(0.0, 0.0);
+        t.push(0, NodeKind::Max, 0, 0.3, 0.3);
+        t.push(0, NodeKind::Max, 0, 0.7, 0.7);
+        let r = two_fidelity_search(&t, 0, &search_cfg(0.05, 0.1), &mut Xs(11));
+        assert!(r.certified);
+        assert_eq!(r.best_action, 2);
+        assert_eq!(r.cost.slow, 0, "exact root intervals exit before sampling");
+        assert_eq!(r.cost.fast, 2);
+    }
+
+    #[test]
+    fn single_child_root_certifies_immediately() {
+        let mut t = VecTree::new(0.0, 0.0);
+        t.push(0, NodeKind::Max, 0, 0.4, 0.4);
+        let r = two_fidelity_search(&t, 0, &search_cfg(0.05, 0.1), &mut Xs(12));
+        assert!(r.certified);
+        assert_eq!(r.best_action, 1);
+    }
+
+    #[test]
+    fn ties_break_to_the_lowest_handle() {
+        let mut t = VecTree::new(0.0, 0.0);
+        t.push(0, NodeKind::Max, 0, 0.5, 0.5);
+        t.push(0, NodeKind::Max, 0, 0.5, 0.5);
+        let r = two_fidelity_search(&t, 0, &search_cfg(0.05, 0.1), &mut Xs(13));
+        assert_eq!(r.best_action, 1, "equal L endpoints resolve to handle 1");
+    }
+
+    #[test]
+    fn empty_intersection_guard_terminates_with_default_action() {
+        // Dishonest fast oracle: node 1 declares B(0) = 1 but reports fast
+        // 10.0 for a true value of 0.0 — an E_δ violation the guard must
+        // detect (one slow sample collapses node 1's local interval to
+        // empty), then terminate with certified = false and the current
+        // leader as default action (paper B.3 convention), never looping.
+        let mut t = VecTree::new(1.0, 0.1);
+        t.push(0, NodeKind::Max, 0, 10.0, 0.0); // the liar
+        t.push(0, NodeKind::Max, 0, 9.0, 9.0);
+        let r = two_fidelity_search(&t, 0, &search_cfg(0.01, 0.1), &mut Xs(14));
+        assert!(!r.certified);
+        assert_eq!(r.best_action, 1, "default action = leader at guard time");
+        assert!(r.cost.slow >= 1);
+    }
+
+    #[test]
+    fn slow_only_route_terminates_certified_on_the_true_argmax() {
+        // A ~1e6 envelope makes the fast oracle useless; termination must
+        // ride the local slow route alone (local reversibility),
+        // interleaving the leader-L / challenger-U targets until the CIs
+        // separate beyond the stop rule.
+        let mut t = VecTree::new(1.0e6, 0.05);
+        t.push(0, NodeKind::Max, 0, 0.0, 0.2);
+        t.push(0, NodeKind::Max, 0, 0.0, 0.8);
+        let r = two_fidelity_search(&t, 0, &search_cfg(0.05, 0.05), &mut Xs(15));
+        assert!(r.certified);
+        assert_eq!(r.best_action, 2);
+        assert!(
+            r.cost.slow >= 2,
+            "both root sides must be sampled before certification"
+        );
+    }
+
+    #[test]
+    fn random_small_trees_recommend_epsilon_optimal_roots() {
+        // PAC smoke (the heavy suite is T2's bench): 32 deterministic
+        // D=3/b=3 trees, honest loose envelopes (bias 0.08/0.04/0.02 at
+        // h=0/1/2 against declared 0.12·2^-h), a ≥0.3 root gap, ε = 0.1.
+        // Every recommendation must be certified and ε-optimal. Seeded
+        // everywhere — no global RNG, fully deterministic.
+        let mut errors = 0usize;
+        for seed in 0..32u64 {
+            let mut xs = Xs(0x9E37_79B9_7F4A_7C15 ^ seed);
+            let mut t = VecTree::new(0.12, 0.05);
+            // Root children 1..=3: child 1's subtree is worth ~0.8, the
+            // other two ≤ 0.4 (a gap the stop rule can certify cheaply).
+            for which in 0..3u32 {
+                let kind = if which % 2 == 0 {
+                    NodeKind::Max
+                } else {
+                    NodeKind::Min
+                };
+                let d1 = t.push(0, kind, 1, 0.0, 0.0);
+                for _ in 0..3 {
+                    let d2 = t.push(d1, NodeKind::Max, 2, 0.0, 0.0);
+                    for _ in 0..3 {
+                        let mean = if which == 0 {
+                            0.7 + 0.2 * xs.f64() as f32
+                        } else {
+                            0.4 * xs.f64() as f32
+                        };
+                        let leaf = t.push(d2, NodeKind::Max, 0, 0.0, mean);
+                        let sign = if leaf % 2 == 0 { 1.0_f32 } else { -1.0 };
+                        t.fast[leaf as usize] = mean + 0.08 * sign;
+                    }
+                    let sign = if d2 % 2 == 0 { 1.0_f32 } else { -1.0 };
+                    t.fast[d2 as usize] = t.exact(d2) + 0.04 * sign;
+                }
+                let sign = if d1 % 2 == 0 { 1.0_f32 } else { -1.0 };
+                t.fast[d1 as usize] = t.exact(d1) + 0.02 * sign;
+            }
+            let true_best = (1..=3u32).map(|c| t.exact(c)).fold(f32::MIN, f32::max);
+            let r = two_fidelity_search(&t, 0, &search_cfg(0.1, 0.05), &mut Xs(seed + 1_000));
+            assert!(r.certified, "seed {seed}: must terminate certified");
+            if t.exact(r.best_action) < true_best - 0.1 {
+                errors += 1;
+            }
+        }
+        assert!(
+            errors <= 2,
+            "PAC smoke: {errors} errors over 32 trees (δ = 0.05)"
+        );
+    }
+
+    #[test]
+    fn gamma_budget_rule_and_m_samples_are_consistent() {
+        // Eq. 7: Γ = 0 inside the quarter-scale cutoff, else c·m.
+        assert_eq!(gamma_v(0.1, 0.8, 3.0, 7), 0.0);
+        assert!((gamma_v(0.3, 0.8, 3.0, 7) - 21.0).abs() < 1e-12);
+        // m: monotone in the width target, and the returned count certifies.
+        let loose = m_samples(1.0, 1e-3, 0.5);
+        let tight = m_samples(0.1, 1e-3, 0.5);
+        assert!(loose < tight);
+        assert!(loose >= 1);
+        let m = m_samples(0.5, 1e-3, 0.5);
+        assert!(2.0 * beta(m, 1e-3, 0.5) <= 0.5, "m must certify its target");
+    }
+
+    #[test]
+    #[should_panic(expected = "epsilon")]
+    fn rejects_negative_epsilon() {
+        let t = VecTree::new(0.0, 0.0);
+        let cfg = SearchConfig {
+            epsilon: -0.1,
+            ..search_cfg(0.05, 0.1)
+        };
+        let _ = two_fidelity_search(&t, 0, &cfg, &mut Xs(16));
+    }
+
+    #[test]
+    #[should_panic(expected = "node_cap")]
+    fn rejects_zero_node_cap() {
+        let t = VecTree::new(0.0, 0.0);
+        let cfg = SearchConfig {
+            node_cap: 0,
+            ..search_cfg(0.05, 0.1)
+        };
+        let _ = two_fidelity_search(&t, 0, &cfg, &mut Xs(17));
     }
 }
