@@ -141,6 +141,16 @@ pub mod float_order;
 // rank arithmetic, zero-cost-unless-invoked.
 pub mod stats;
 
+// contrast_combine — the affine strong−weak combine, ONE home for the
+// `strong + ω·(strong − weak)` arithmetic (Plan 617 T1.2): the 865
+// probe-guidance convex blend (`λ·x + (1−λ)·p`) and the LoopCD
+// recurrent-depth extrapolation (`z_R + ω(z_R − z_k)`, the same family at
+// `λ = 1 + ω`) share this formula-preserving kernel. Gated
+// `any(probe_guidance, loop_guidance)` — a build carrying neither consumer
+// compiles it to nothing; each root feature forwards its core twin.
+#[cfg(any(feature = "probe_guidance", feature = "loop_guidance"))]
+pub mod contrast_combine;
+
 // rating — Elo + Plackett-Luce rating primitives (Issue 686, promoted from
 // four in-stack copies: katgpt-pruners arena EloCalculator + proof
 // lambda_to_elo, riir-ai riir-games ruliology ParadigmRanking, riir-clippy

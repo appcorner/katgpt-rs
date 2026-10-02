@@ -122,6 +122,16 @@ statrs = "0.17"
 
 [features]
 
+# probe_guidance (core half, Plan 617 T1.2): compiles the contrast_combine
+# module for the 865 probe-guidance consumer. Root `probe_guidance` forwards
+# here. No behavior of its own — the kernel is pure arithmetic.
+probe_guidance = []
+
+# loop_guidance (core half, Plan 617 T0.2/T1.2): compiles the contrast_combine
+# module for the LoopCD recurrent-depth contrast consumer. Root `loop_guidance`
+# forwards here. No behavior of its own — the kernel is pure arithmetic.
+loop_guidance = []
+
 # horizon_weights (Issue 875 T1 / Research 582, 2026-09-22): PFD (arXiv:
 # 2605.09071) remaining-horizon weighting — the Fubini-law (T−t)/T generic
 # weights + the exact closed form w(t) = ½(T−t)·g(t)²·c(t,0)² with
