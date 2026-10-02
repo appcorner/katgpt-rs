@@ -4119,6 +4119,17 @@ name = "bench_616_minmax_partition_goat"
 harness = false
 required-features = ["minmax_partition"]
 
+# Plan 615 Phase 2 — Two-Fidelity Certified BAI GOAT gate (T2.1–T2.5).
+# CANARY-first (impossible floors fire), SANITY T2.2b (negamax-UCT adapter
+# converges on zero-noise), G1 empirical PAC via one-sided Clopper–Pearson
+# + all-certified + interval validity, G2 strict paired win (LB95 > 0 per
+# setting) vs BAI-MCTS (LUCB stopping) and negamax-UCT (matched accuracy),
+# G4 zero per-iteration allocation. Paper-parity figures are CONTEXT rows.
+[[bench]]
+name = "bench_615_two_fidelity_bai_goat"
+harness = false
+required-features = ["two_fidelity_bai"]
+
 # Plan 607 T3 G4 — zero-alloc steady state for the head's DECISION path
 # (pick + score). HeadFitter's one-time scratch construction is the cold
 # fit path and deliberately OUTSIDE the measured window (documented in the

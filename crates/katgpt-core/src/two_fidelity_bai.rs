@@ -4,11 +4,11 @@
 //! trees, distilled from Chen & Chen, *Two-Fidelity Best-Action
 //! Identification for Stochastic Minimax Tree* (arXiv:2606.01708, NeurIPS
 //! 2026) — Research 601. Every node can be evaluated by a **fast oracle**
-//! (cheap, deterministic, biased within a known nondecreasing envelope
-//! `B(h)`, `B(0) = 0`) or a **slow oracle** (expensive, stochastic,
-//! unbiased, queryable at any exposed node). The algorithm races minimax-style
-//! fast expansion against MCTS-style slow certification until the root action
-//! is certified ε-optimal with confidence 1−δ.
+//!       (cheap, deterministic, biased within a known nondecreasing envelope
+//!       `B(h)`, `B(0) = 0`) or a **slow oracle** (expensive, stochastic,
+//!       unbiased, queryable at any exposed node). The algorithm races minimax-style
+//!       fast expansion against MCTS-style slow certification until the root action
+//!       is certified ε-optimal with confidence 1−δ.
 //!
 //! This module ships the Phase-1 search (plan T1.1–T1.7): the [`MinimaxSpace`]
 //! consumer trait, the per-node interval state with minimax backup (paper
@@ -1154,13 +1154,13 @@ mod tests {
                             0.4 * xs.f64() as f32
                         };
                         let leaf = t.push(d2, NodeKind::Max, 0, 0.0, mean);
-                        let sign = if leaf % 2 == 0 { 1.0_f32 } else { -1.0 };
+                        let sign = if leaf.is_multiple_of(2) { 1.0_f32 } else { -1.0 };
                         t.fast[leaf as usize] = mean + 0.08 * sign;
                     }
-                    let sign = if d2 % 2 == 0 { 1.0_f32 } else { -1.0 };
+                    let sign = if d2.is_multiple_of(2) { 1.0_f32 } else { -1.0 };
                     t.fast[d2 as usize] = t.exact(d2) + 0.04 * sign;
                 }
-                let sign = if d1 % 2 == 0 { 1.0_f32 } else { -1.0 };
+                let sign = if d1.is_multiple_of(2) { 1.0_f32 } else { -1.0 };
                 t.fast[d1 as usize] = t.exact(d1) + 0.02 * sign;
             }
             let true_best = (1..=3u32).map(|c| t.exact(c)).fold(f32::MIN, f32::max);
@@ -1187,7 +1187,7 @@ mod tests {
 
     #[test]
     fn search_is_deterministic_for_a_seed() {
-        let mut build = || {
+        let build = || {
             let mut t = VecTree::new(1.0e6, 0.05);
             t.push(0, NodeKind::Max, 0, 0.0, 0.2);
             t.push(0, NodeKind::Max, 0, 0.0, 0.8);
