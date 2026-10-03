@@ -481,23 +481,57 @@ fn gamma_v(bias: f64, rho: f64, slow_cost: f32, local_samples: u32) -> f64 {
 }
 
 /// `m_v(ρ)`: the smallest sample count whose slow-interval width `2β(n)`
-/// certifies side width `width_target` (β is stage-constant, so the scan
-/// walks stage starts; ~80 stages to β ≈ 0 for any δ).
-fn m_samples(width_target: f64, delta_v: f64, sigma: f64) -> u32 {
-    debug_assert!(width_target.is_finite() && width_target > 0.0);
-    let mut k: u32 = 1;
-    loop {
-        let n = stage_start(k);
-        if 2.0 * beta(n, delta_v, sigma) <= width_target {
-            return n;
+/// certifies side width `width_target`. β is stage-constant, so only the
+/// ~[`M_SAMPLES_STAGE_MAX`] distinct stage radii matter — [`stage_radii`]
+/// precomputes them once (the profiled hot path: the free-function form
+/// re-evaluated β's ln/sqrt/exp2 per stage per call, ~97% of recording-run
+/// wall at D ≥ 7), and [`m_samples_with`] walks the table with plain f64
+/// compares. The free [`m_samples`] builds the table per call and stays the
+/// spec/reference form (unit-tested); the search consumes the precomputed
+/// pair — identical values, identical branches, bit-identical results.
+const M_SAMPLES_STAGE_MAX: u32 = 200;
+
+/// β(n_k, δ_v, σ) for every stage start n_k, k = 1.. — the table stops at
+/// the last stage whose n_k is representable (`stage_start` saturates `as
+/// u32` once 1.5^(k−1) > u32::MAX — k = 57 — and β there would overflow
+/// `stage_index`'s correction walk; the pre-table lazy form never evaluated
+/// those stages for honest widths). `m_samples_with` returns the
+/// `u32::MAX` backstop past the table — the certified-search degradation
+/// the callers already document — where the pre-table form would have
+/// panicked mid-walk. Built once per search for its fixed (δ_v, σ).
+fn stage_radii(delta_v: f64, sigma: f64) -> Vec<f64> {
+    let mut radii = Vec::with_capacity(64);
+    for k in 1..=M_SAMPLES_STAGE_MAX {
+        let n_k = stage_start(k);
+        if n_k == u32::MAX {
+            break;
         }
-        k += 1;
-        if k > 200 {
-            // Unreachable for honest widths (β → 0); the caller's iteration
-            // cap is the belt-and-braces backstop.
-            return u32::MAX;
+        radii.push(beta(n_k, delta_v, sigma));
+    }
+    radii
+}
+
+/// The `m_v(ρ)` walk over precomputed stage radii: the first stage whose
+/// radius certifies `width_target`, as the sample count n_k; `u32::MAX`
+/// past the table (unreachable for honest widths — the caller's iteration
+/// cap is the belt-and-braces backstop).
+fn m_samples_with(radii: &[f64], width_target: f64) -> u32 {
+    debug_assert!(width_target.is_finite() && width_target > 0.0);
+    for (i, &r) in radii.iter().enumerate() {
+        if 2.0 * r <= width_target {
+            return stage_start(i as u32 + 1);
         }
     }
+    u32::MAX
+}
+
+/// Reference form (test-side): builds the stage table per call and walks it
+/// — the spec [`m_samples_with`]'s precomputed table is pinned against. The
+/// production search never calls this (its table is built once per search;
+/// the profiled pre-table form rebuilt it per call — the hot-path finding).
+#[cfg(test)]
+fn m_samples(width_target: f64, delta_v: f64, sigma: f64) -> u32 {
+    m_samples_with(&stage_radii(delta_v, sigma), width_target)
 }
 
 /// The certified two-fidelity search (plan T1.5/T1.6; paper Algorithm 1).
@@ -546,6 +580,7 @@ pub fn two_fidelity_search<S: MinimaxSpace, R: RngCore>(
         states: HashMap::with_capacity(1024),
         rho0: 0.0,
         cost: Cost::default(),
+        stage_radii: None,
     };
     // The root's own bookkeeping node (its interval is never read — only
     // kind/depth for expansion bookkeeping).
@@ -633,6 +668,14 @@ struct Searcher<'a, S: MinimaxSpace, R: RngCore> {
     states: HashMap<u32, NodeState>,
     rho0: f64,
     cost: Cost,
+    /// Precomputed stage radii for the search's fixed (δ_v, σ) — the
+    /// `m_v(ρ)` walk ([`m_samples_with`]) reads this table instead of
+    /// re-evaluating β per stage per call (the profiled hot path). Built
+    /// LAZILY on first resolution: a search whose ε-stop fires before any
+    /// `resolve_step` never touches β, which keeps σ = 0 exact-oracle
+    /// configs legal exactly as the pre-table lazy form did (β asserts
+    /// σ > 0; reaching m_v with σ = 0 panics identically either way).
+    stage_radii: Option<Vec<f64>>,
 }
 
 impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
@@ -817,7 +860,12 @@ impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
         // simplification: cumulative across scales — conservative, and never
         // correctness-bearing: both routes only tighten valid intervals).
         let bias = f64::from(self.space.bias_envelope(depth));
-        let gamma = gamma_v(bias, rho, self.config.slow_cost, m_samples(rho / 2.0, self.delta_v(), self.config.sigma));
+        if self.stage_radii.is_none() {
+            self.stage_radii =
+                Some(stage_radii(self.config.delta_for_node(), self.config.sigma));
+        }
+        let m = m_samples_with(self.stage_radii.as_deref().unwrap_or(&[]), rho / 2.0);
+        let gamma = gamma_v(bias, rho, self.config.slow_cost, m);
         let budget = race_scale(depth) * gamma;
         let spend = self.state(node).rec_spend;
         if gamma > 0.0 && spend < budget {
@@ -1327,6 +1375,17 @@ mod tests {
         assert!(loose >= 1);
         let m = m_samples(0.5, 1e-3, 0.5);
         assert!(2.0 * beta(m, 1e-3, 0.5) <= 0.5, "m must certify its target");
+        // The searcher's precomputed walk must agree with the reference form
+        // on a width grid — the free fn builds the same table per call, so a
+        // divergence would mean the hot path and the spec have parted ways.
+        let radii = stage_radii(1e-3, 0.5);
+        for width in [0.9, 0.5, 0.2, 0.05, 0.01, 1e-4, 1e-8] {
+            assert_eq!(
+                m_samples(width, 1e-3, 0.5),
+                m_samples_with(&radii, width),
+                "reference and precomputed m_v disagree at width {width}"
+            );
+        }
     }
 
     #[test]
