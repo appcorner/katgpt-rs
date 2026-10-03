@@ -773,13 +773,59 @@ fn slow_only(tree: &BenchTree, rng: &mut Xs) -> (u32, u64) {
 // ─── 2FFS runner ─────────────────────────────────────────────────────────────────
 
 fn run_2ffs(tree: &BenchTree, seed: u64) -> TwoFidelityResult {
+    run_2ffs_with(
+        tree,
+        seed,
+        std::env::var("B615_2FFS_LAZY").is_ok(),
+        &AbCfg::protocol(),
+    )
+}
+
+/// The (ε, σ, c) triple a 2FFS run uses. The gated suite always runs
+/// [`AbCfg::protocol`]; only the `B615_2FFS_AB` resolver A/B reads the
+/// `B615_AB_{EPS,SIGMA,COST}` overrides (σ also sets the slow noise
+/// amplitude — uniform ±σ is σ-sub-Gaussian).
+#[derive(Clone, Copy)]
+struct AbCfg {
+    eps: f32,
+    sigma: f64,
+    cost: f32,
+}
+
+impl AbCfg {
+    fn protocol() -> Self {
+        Self {
+            eps: EPSILON,
+            sigma: SIGMA,
+            cost: SLOW_COST,
+        }
+    }
+
+    fn from_env() -> Self {
+        let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+        let p = Self::protocol();
+        Self {
+            eps: get("B615_AB_EPS").map_or(p.eps, |v| v as f32),
+            sigma: get("B615_AB_SIGMA").unwrap_or(p.sigma),
+            cost: get("B615_AB_COST").map_or(p.cost, |v| v as f32),
+        }
+    }
+}
+
+fn run_2ffs_with(
+    tree: &BenchTree,
+    seed: u64,
+    lazy_discharge: bool,
+    ab: &AbCfg,
+) -> TwoFidelityResult {
     let config = SearchConfig {
-        epsilon: EPSILON,
+        epsilon: ab.eps,
         delta: DELTA,
-        slow_cost: SLOW_COST,
+        slow_cost: ab.cost,
         node_cap: NODE_CAP,
-        sigma: SIGMA,
+        sigma: ab.sigma,
         trace_nodes: std::env::var("B615_2FFS_TRACE").is_ok(),
+        lazy_discharge,
     };
     let mut rng = Xs(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0xB10C));
     two_fidelity_search(tree, 0, &config, &mut rng)
@@ -1165,6 +1211,109 @@ fn run_setting(d: u8, b: usize, trees: usize) -> SettingResult {
     r
 }
 
+// ─── Issue 916 b-lever A/B: v1 resolver vs lazy discharge ─────────────────────
+
+/// Per-arm tally for the `B615_2FFS_AB` mode.
+#[derive(Default)]
+struct ArmTally {
+    errs: u64,
+    uncertified: u64,
+    cert_invalid: u64,
+    slow: f64,
+    fast: f64,
+    cost: Vec<f64>,
+}
+
+impl ArmTally {
+    fn absorb(&mut self, tree: &BenchTree, res: &TwoFidelityResult, best_v: f64, ab: &AbCfg) {
+        if tree.vstar[res.best_action as usize] < best_v - f64::from(ab.eps) {
+            self.errs += 1;
+        }
+        if res.certified {
+            for &(handle, lo, hi) in &res.root_intervals {
+                let v = tree.vstar[handle as usize];
+                if !(lo <= hi && v >= lo - 1e-6 && v <= hi + 1e-6) {
+                    self.cert_invalid += 1;
+                }
+            }
+        } else {
+            self.uncertified += 1;
+        }
+        self.slow += res.cost.slow as f64;
+        self.fast += res.cost.fast as f64;
+        self.cost.push(res.cost.unified(ab.cost));
+    }
+}
+
+/// `B615_2FFS_AB=1`: the 2FFS resolver A/B alone (no baselines — those are
+/// the expensive arms and do not depend on the resolver). Same trees, same
+/// per-tree RNG seed for both arms; reports the G1 quantities for each arm
+/// (errors with the one-sided CP95 upper bound, uncertified exits, invalid
+/// certified intervals) and the paired unified-cost LB95 of (v1 − lazy).
+fn ab_lazy_discharge(trees: usize) -> bool {
+    let ab = AbCfg::from_env();
+    println!(
+        "\n── Issue 916 b-lever A/B: v1 resolver vs lazy discharge ({trees} trees/setting, ε={} σ={} c={}) ──",
+        ab.eps, ab.sigma, ab.cost
+    );
+    let mut ok = true;
+    let (mut all_v1, mut all_ld) = (ArmTally::default(), ArmTally::default());
+    for (d, b) in SETTINGS {
+        let (mut v1, mut ld) = (ArmTally::default(), ArmTally::default());
+        for t in 0..trees {
+            let tree = BenchTree::generate(d, b, 0x615_0000_u64 + t as u64, ab.sigma as f32);
+            let (_, best_v) = tree.true_best();
+            let seed = 1_000 + t as u64;
+            v1.absorb(&tree, &run_2ffs_with(&tree, seed, false, &ab), best_v, &ab);
+            ld.absorb(&tree, &run_2ffs_with(&tree, seed, true, &ab), best_v, &ab);
+        }
+        let diffs: Vec<f64> = v1.cost.iter().zip(&ld.cost).map(|(a, c)| a - c).collect();
+        let n = trees as f64;
+        println!(
+            "  D{d}b{b}  v1: errs {} uncert {} invalid {} | slow {:.0} fast {:.0} cost {:.0}",
+            v1.errs,
+            v1.uncertified,
+            v1.cert_invalid,
+            v1.slow / n,
+            v1.fast / n,
+            mean(&v1.cost)
+        );
+        println!(
+            "         lazy: errs {} uncert {} invalid {} | slow {:.0} fast {:.0} cost {:.0}",
+            ld.errs,
+            ld.uncertified,
+            ld.cert_invalid,
+            ld.slow / n,
+            ld.fast / n,
+            mean(&ld.cost)
+        );
+        println!(
+            "         cost ratio v1/lazy {:.2}x, paired LB95(v1 − lazy) {:+.0}",
+            mean(&v1.cost) / mean(&ld.cost),
+            lb95(&diffs)
+        );
+        for (a, s) in [(&mut all_v1, v1), (&mut all_ld, ld)] {
+            a.errs += s.errs;
+            a.uncertified += s.uncertified;
+            a.cert_invalid += s.cert_invalid;
+            a.slow += s.slow;
+            a.fast += s.fast;
+            a.cost.extend(s.cost);
+        }
+    }
+    let n_all = all_ld.cost.len() as u64;
+    let cp = cp_upper(all_ld.errs, n_all);
+    println!(
+        "  lazy G1: errs {}/{n_all} (CP95 upper {cp:.5} vs δ {DELTA}), uncertified {}, invalid certified intervals {}",
+        all_ld.errs, all_ld.uncertified, all_ld.cert_invalid
+    );
+    if cp > DELTA || all_ld.cert_invalid > 0 || all_ld.uncertified > 0 {
+        println!("  ⛔ lazy-discharge arm fails the G1 quantities");
+        ok = false;
+    }
+    ok
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -1173,6 +1322,11 @@ fn main() {
     println!("╚══════════════════════════════════════════════════════════════╝");
     let trees = trees_per_setting();
     println!("settings {:?}, trees/setting {trees}, ε={EPSILON} δ={DELTA} c={SLOW_COST} σ={SIGMA}", SETTINGS);
+    if std::env::var("B615_2FFS_AB").is_ok() {
+        // Resolver A/B only (Issue 916 b-lever) — skips the gated suite.
+        let ok = ab_lazy_discharge(trees);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
 
     // ── CANARY (first — impossible floors must fire) ──
     let mut gates = Gates { failures: Vec::new() };

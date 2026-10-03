@@ -357,6 +357,40 @@ pub struct SearchConfig {
     /// (no allocation, no stop-rule, no confidence change), so this is not
     /// a confidence-allocation knob and needs no union-proof ceremony.
     pub trace_nodes: bool,
+    /// Issue 916 (b-lever): resolve with the reference algorithm's **lazy
+    /// discharge + parent-capped scales** instead of the v1 blocking-child
+    /// descent. Opt-in (`false` = the v1 search, bit-identical).
+    ///
+    /// Ported from the authors' implementation
+    /// (`github.com/PeterLauLukChen/2FFS`, `method/twoffs/twoffs.py`:
+    /// `cert` / `active_children` / `child_obligation` / `capped_scale` /
+    /// `root_obligation` / `resolve`), which is how the paper's §1.3 item 2
+    /// lazy discharge and the Prop. B.10 effective-gap bound
+    /// (`Δ_v^eff ≤ 2ρ_k`: certify only to the precision that can affect the
+    /// root) are realised in code:
+    /// - a child obligation runs at a scale **no finer than its parent's**
+    ///   (`capped_scale`), so a subtree is never driven past the resolution
+    ///   the consuming decision can use — the measured ladder overshoot;
+    /// - in the comparison cases (Max, L) / (Min, U) a child whose opposite
+    ///   endpoint is already within `ρ_k/2` of the parent's bound is
+    ///   discharged without being certified, and the live blocker's
+    ///   OPPOSITE side is refined first (it is what keeps it live);
+    /// - the Eq. 7 race budget is per (node, scale), and an expansion is
+    ///   its own work unit.
+    ///
+    /// Soundness is unchanged by construction: the knob only changes WHICH
+    /// node receives the next sample or expansion. Every interval is still
+    /// the honest fast envelope ∩ the time-uniform slow CI ∩ the Eq. 6
+    /// backup, the δ_v allocation is untouched, and the ε-stop rule is the
+    /// same — time-uniform CIs are valid under any adaptive sampling rule,
+    /// so PAC (Thm 3.1) rides on interval validity + the stop exactly as in
+    /// v1. Divergence from the reference, documented: certificates latch
+    /// when EVALUATED (the reference sweeps every explored node per step);
+    /// a latch can only be missed, never invented, so this costs work and
+    /// never correctness. The reference's "slow-CI width ≤ ρ_k/2" branch is
+    /// subsumed here (`local()` ⊇ effective, so the effective-width test
+    /// fires first).
+    pub lazy_discharge: bool,
 }
 
 impl SearchConfig {
@@ -581,6 +615,7 @@ pub fn two_fidelity_search<S: MinimaxSpace, R: RngCore>(
         rho0: 0.0,
         cost: Cost::default(),
         stage_radii: None,
+        m_exp: HashMap::new(),
     };
     // The root's own bookkeeping node (its interval is never read — only
     // kind/depth for expansion bookkeeping).
@@ -651,6 +686,19 @@ pub fn two_fidelity_search<S: MinimaxSpace, R: RngCore>(
         // (tie → the leader's L-side, deterministic).
         let challenger = search
             .pick_extreme_excluding(root_children.as_slice(), Side::Upper, true, leader);
+        if config.lazy_discharge {
+            // Reference `root_obligation`: the leader's L-side at its active
+            // scale vs the challenger's coarser contender side; no finite
+            // obligation left ⇒ the reference's uncertified exit.
+            match search.ld_root_obligation(leader, challenger) {
+                Some((node, side, k)) => {
+                    search.ld_resolve(node, side, k, f64::INFINITY);
+                }
+                None => return search.finish(root_children, false),
+            }
+            iters += 1;
+            continue;
+        }
         let target = if search.width_of(leader) >= search.width_of(challenger) {
             (leader, Side::Lower)
         } else {
@@ -676,7 +724,24 @@ struct Searcher<'a, S: MinimaxSpace, R: RngCore> {
     /// configs legal exactly as the pre-table lazy form did (β asserts
     /// σ > 0; reaching m_v with σ = 0 panics identically either way).
     stage_radii: Option<Vec<f64>>,
+    /// Lazy-discharge mode only: recursive-route spend per (node, scale) —
+    /// the reference's `m_exp`, compared against the Eq. 7 race budget at
+    /// that scale. Empty (never touched) in v1 mode.
+    m_exp: HashMap<(u32, u8), f64>,
 }
+
+/// Outcome of one lazy-discharge resolution unit (the reference's
+/// `Status`): latched/certified with no spend, made progress, or refused
+/// because the caller's remaining recursive budget cannot pay for the unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LdStatus {
+    Cert,
+    Progress,
+    Blocked,
+}
+
+/// Finest dyadic scale the `done` bitmask can latch (`u64` per side).
+const LD_MAX_SCALE: u8 = 63;
 
 impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
     fn delta_v(&self) -> f64 {
@@ -884,6 +949,340 @@ impl<'a, S: MinimaxSpace, R: RngCore> Searcher<'a, S, R> {
         self.sample_local(node)
     }
 
+    // ── Lazy-discharge resolver (Issue 916 b-lever; `lazy_discharge`) ──────
+    //
+    // A transcription of the reference implementation's resolver; method
+    // names keep the reference's (`cert`, `comp`, `active_children`,
+    // `capped_scale`, `child_obligation`, `resolve`) so the two can be read
+    // side by side. Scales are `u8` in `[0, LD_MAX_SCALE]`; `None` stands
+    // for the reference's infinite scale.
+
+    fn ld_rho(&self, k: u8) -> f64 {
+        self.rho0.max(1e-12) * (-f64::from(k)).exp2()
+    }
+
+    /// The dyadic band of the current width: `ρ_k/2 < w ≤ ρ_k` (`None` once
+    /// the width is numerically zero — nothing left to certify).
+    fn ld_width_scale(&self, node: u32) -> Option<u8> {
+        let w = self.width_of(node).max(0.0);
+        if w <= 1e-14 {
+            return None;
+        }
+        if w > self.ld_rho(0) {
+            return Some(0);
+        }
+        (0..=LD_MAX_SCALE)
+            .find(|&k| {
+                let rho = self.ld_rho(k);
+                rho / 2.0 < w && w <= rho
+            })
+            .or(Some(LD_MAX_SCALE))
+    }
+
+    fn ld_is_done(&self, node: u32, side: Side, k: u8) -> bool {
+        self.states[&node].done[side.index()] >> k & 1 == 1
+    }
+
+    fn ld_set_done(&mut self, node: u32, side: Side, k: u8) {
+        self.state(node).done[side.index()] |= 1 << k;
+    }
+
+    /// `Comp_s(v, k)`: latched, or observably certified now (latched on the
+    /// spot — the evaluate-time latch documented on the config knob).
+    fn ld_comp(&mut self, node: u32, side: Side, k: u8) -> bool {
+        if self.ld_is_done(node, side, k) {
+            return true;
+        }
+        let certified = self.ld_cert(node, side, k);
+        if certified {
+            self.ld_set_done(node, side, k);
+        }
+        certified
+    }
+
+    fn ld_is_comparison(&self, node: u32, side: Side) -> bool {
+        matches!(
+            (self.states[&node].kind, side),
+            (NodeKind::Max, Side::Lower) | (NodeKind::Min, Side::Upper)
+        )
+    }
+
+    /// `Cert_s(v, k)` (reference `cert`): width within `ρ_k/2`; or, once
+    /// expanded, the comparison-case discharge (every child either outside
+    /// the margin of the parent's bound or itself certified) / the
+    /// selector-case witness certification.
+    fn ld_cert(&mut self, node: u32, side: Side, k: u8) -> bool {
+        let tol = self.ld_rho(k) / 2.0;
+        if self.width_of(node) <= tol {
+            return true;
+        }
+        let (kind, expanded) = {
+            let st = &self.states[&node];
+            (st.kind, st.expanded)
+        };
+        if !expanded {
+            return false;
+        }
+        let children = self.states[&node].children.clone();
+        if children.is_empty() {
+            return false;
+        }
+        match (kind, side) {
+            (NodeKind::Max, Side::Lower) => {
+                let lambda = children
+                    .iter()
+                    .map(|&c| self.endpoint(c, Side::Lower))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                children.iter().all(|&c| {
+                    self.endpoint(c, Side::Upper) <= lambda + tol || self.ld_comp(c, Side::Lower, k)
+                })
+            }
+            (NodeKind::Min, Side::Upper) => {
+                let lambda = children
+                    .iter()
+                    .map(|&c| self.endpoint(c, Side::Upper))
+                    .fold(f64::INFINITY, f64::min);
+                children.iter().all(|&c| {
+                    self.endpoint(c, Side::Lower) >= lambda - tol || self.ld_comp(c, Side::Upper, k)
+                })
+            }
+            _ => {
+                let active = self.ld_active_children(node, side, k);
+                !active.is_empty() && active.iter().all(|&c| self.ld_comp(c, side, k))
+            }
+        }
+    }
+
+    /// Reference `active_children`: selector cases → the endpoint witnesses
+    /// (exact ties kept); comparison cases → the children still inside the
+    /// `ρ_k/2` margin and not yet certified (the lazily-undischarged set).
+    fn ld_active_children(&mut self, node: u32, side: Side, k: u8) -> ArrayVec<u32, MAX_CHILDREN> {
+        let tol = self.ld_rho(k) / 2.0;
+        let kind = self.states[&node].kind;
+        let children = self.states[&node].children.clone();
+        let mut out = ArrayVec::new();
+        if children.is_empty() {
+            return out;
+        }
+        match (kind, side) {
+            (NodeKind::Min, Side::Lower) | (NodeKind::Max, Side::Upper) => {
+                let want_max = kind == NodeKind::Max;
+                let best = children.iter().map(|&c| self.endpoint(c, side)).fold(
+                    if want_max {
+                        f64::NEG_INFINITY
+                    } else {
+                        f64::INFINITY
+                    },
+                    |a, b| {
+                        if want_max { a.max(b) } else { a.min(b) }
+                    },
+                );
+                for &c in children.as_slice() {
+                    if (self.endpoint(c, side) - best).abs() <= 1e-14 {
+                        out.push(c);
+                    }
+                }
+            }
+            (NodeKind::Max, Side::Lower) => {
+                let lambda = children
+                    .iter()
+                    .map(|&c| self.endpoint(c, Side::Lower))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                for &c in children.as_slice() {
+                    if self.endpoint(c, Side::Upper) > lambda + tol
+                        && !self.ld_comp(c, Side::Lower, k)
+                    {
+                        out.push(c);
+                    }
+                }
+            }
+            (NodeKind::Min, Side::Upper) => {
+                let lambda = children
+                    .iter()
+                    .map(|&c| self.endpoint(c, Side::Upper))
+                    .fold(f64::INFINITY, f64::min);
+                for &c in children.as_slice() {
+                    if self.endpoint(c, Side::Lower) < lambda - tol
+                        && !self.ld_comp(c, Side::Upper, k)
+                    {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Reference `active_scale`: the first uncertified scale at or below the
+    /// width's own band.
+    fn ld_active_scale(&mut self, node: u32, side: Side) -> Option<u8> {
+        let start = self.ld_width_scale(node)?;
+        (start..=LD_MAX_SCALE).find(|&k| !self.ld_comp(node, side, k))
+    }
+
+    /// Reference `capped_scale`: the coarsest uncertified scale **no finer
+    /// than the parent's** — the propagated-resolution cap.
+    fn ld_capped_scale(&mut self, node: u32, side: Side, parent_k: u8) -> Option<u8> {
+        (0..=parent_k).find(|&k| !self.ld_comp(node, side, k))
+    }
+
+    /// Reference `contender_scale`: the challenger's coarser side (tie → L).
+    fn ld_contender_scale(&mut self, node: u32) -> (Side, Option<u8>) {
+        let k_l = self.ld_active_scale(node, Side::Lower);
+        let k_u = self.ld_active_scale(node, Side::Upper);
+        match (k_l, k_u) {
+            (Some(l), Some(u)) if l <= u => (Side::Lower, k_l),
+            (Some(_), None) => (Side::Lower, k_l),
+            _ => (Side::Upper, k_u),
+        }
+    }
+
+    /// Reference `root_obligation` (leader/challenger already picked by the
+    /// shared root loop — identical selectors and tie-breaks).
+    fn ld_root_obligation(&mut self, leader: u32, challenger: u32) -> Option<(u32, Side, u8)> {
+        let k_leader = self.ld_active_scale(leader, Side::Lower);
+        let (side_c, k_c) = self.ld_contender_scale(challenger);
+        match (k_leader, k_c) {
+            (Some(kl), Some(kc)) if kl <= kc => Some((leader, Side::Lower, kl)),
+            (Some(kl), None) => Some((leader, Side::Lower, kl)),
+            (_, Some(kc)) => Some((challenger, side_c, kc)),
+            (None, None) => None,
+        }
+    }
+
+    /// Reference `child_obligation`: comparison cases pick the live blocker
+    /// (max U under Max-L, min L under Min-U) and refine its OPPOSITE side
+    /// first; selector cases pick the widest uncertified witness. Both at
+    /// the parent-capped scale (`None` = nothing left below the cap).
+    fn ld_child_obligation(
+        &mut self,
+        node: u32,
+        side: Side,
+        k: u8,
+    ) -> Option<(u32, Side, Option<u8>)> {
+        if self.ld_is_comparison(node, side) {
+            let active = self.ld_active_children(node, side, k);
+            if active.is_empty() {
+                return None;
+            }
+            let want_max = self.states[&node].kind == NodeKind::Max;
+            let opposite = match side {
+                Side::Lower => Side::Upper,
+                Side::Upper => Side::Lower,
+            };
+            // Blocker: max U (Max) / min L (Min) — i.e. the opposite
+            // endpoint; first occurrence on ties (Python `max`/`min`).
+            let mut blocker = active[0];
+            for &c in active.iter().skip(1) {
+                let (kc, kb) = (self.endpoint(c, opposite), self.endpoint(blocker, opposite));
+                if (want_max && kc > kb) || (!want_max && kc < kb) {
+                    blocker = c;
+                }
+            }
+            if let Some(k_opp) = self.ld_capped_scale(blocker, opposite, k) {
+                return Some((blocker, opposite, Some(k_opp)));
+            }
+            let k_same = self.ld_capped_scale(blocker, side, k);
+            return Some((blocker, side, k_same));
+        }
+        let active = self.ld_active_children(node, side, k);
+        let mut pick: Option<u32> = None;
+        for &c in active.as_slice() {
+            if self.ld_comp(c, side, k) {
+                continue;
+            }
+            // Widest first; first occurrence on ties (Python `max`).
+            if pick.is_none_or(|p| self.width_of(c) > self.width_of(p)) {
+                pick = Some(c);
+            }
+        }
+        let child = pick?;
+        let ck = self.ld_capped_scale(child, side, k);
+        Some((child, side, ck))
+    }
+
+    /// Reference `local_step`: one slow sample unless the caller's cap
+    /// cannot pay for it.
+    fn ld_local_step(&mut self, node: u32, cap: f64) -> (f64, LdStatus) {
+        if cap < f64::from(self.config.slow_cost) {
+            return (0.0, LdStatus::Blocked);
+        }
+        (self.sample_local(node), LdStatus::Progress)
+    }
+
+    /// Eq. 7 race budget at `(node, k)` — the same rule v1 uses, evaluated
+    /// per scale.
+    fn ld_race_budget(&mut self, node: u32, k: u8) -> f64 {
+        let depth = self.states[&node].depth;
+        let rho = self.ld_rho(k);
+        let bias = f64::from(self.space.bias_envelope(depth));
+        if self.stage_radii.is_none() {
+            self.stage_radii = Some(stage_radii(self.config.delta_for_node(), self.config.sigma));
+        }
+        let m = m_samples_with(self.stage_radii.as_deref().unwrap_or(&[]), rho / 2.0);
+        race_scale(depth) * gamma_v(bias, rho, self.config.slow_cost, m)
+    }
+
+    /// Reference `resolve(node, side, scale, cap)`: one work unit toward
+    /// `Comp_side(node, k)` — latch, local sample, expansion, or one
+    /// recursive unit into the obligation child, under the caller's
+    /// remaining recursive budget `cap`.
+    fn ld_resolve(&mut self, node: u32, side: Side, k: u8, cap: f64) -> (f64, LdStatus) {
+        if self.ld_comp(node, side, k) {
+            return (0.0, LdStatus::Cert);
+        }
+        let (depth, expanded) = {
+            let st = &self.states[&node];
+            (st.depth, st.expanded)
+        };
+        if depth == 0 {
+            return self.ld_local_step(node, cap);
+        }
+        let spent = self.m_exp.get(&(node, k)).copied().unwrap_or(0.0);
+        let remaining = self.ld_race_budget(node, k) - spent;
+        if remaining <= 0.0 {
+            return self.ld_local_step(node, cap);
+        }
+        let rec_cap = cap.min(remaining);
+
+        if !expanded {
+            let mut probe = ArrayVec::<u32, MAX_CHILDREN>::new();
+            self.space.children_into(node, &mut probe);
+            let child_cost = probe.len() as f64;
+            if child_cost > remaining {
+                return self.ld_local_step(node, cap);
+            }
+            if child_cost > cap {
+                return (0.0, LdStatus::Blocked);
+            }
+            let children = self.expand(node);
+            let cost = children.len() as f64;
+            *self.m_exp.entry((node, k)).or_insert(0.0) += cost;
+            return (cost, LdStatus::Progress);
+        }
+
+        let Some((child, child_side, child_k)) = self.ld_child_obligation(node, side, k) else {
+            if self.ld_comp(node, side, k) {
+                return (0.0, LdStatus::Cert);
+            }
+            return self.ld_local_step(node, cap);
+        };
+        let Some(child_k) = child_k else {
+            return self.ld_local_step(node, cap);
+        };
+        let (q, status) = self.ld_resolve(child, child_side, child_k, rec_cap);
+        let kind = self.states[&node].kind;
+        self.refresh_backup(node, kind);
+        if status == LdStatus::Blocked {
+            if cap < remaining {
+                return (0.0, LdStatus::Blocked);
+            }
+            return self.ld_local_step(node, cap);
+        }
+        *self.m_exp.entry((node, k)).or_insert(0.0) += q;
+        (q, status)
+    }
+
     /// Freeze the result: leader (argmax L, tie → lowest handle), the cost
     /// ledger, and the root children's effective intervals. When tracing,
     /// emit the per-node sample ledger (Issue 916 cause-(b) measurement).
@@ -1089,6 +1488,7 @@ mod tests {
             node_cap: NODE_CAP,
             sigma: 0.5,
             trace_nodes: false,
+            lazy_discharge: false,
         };
         let per = cfg.delta_for_node();
         assert!((per * f64::from(NODE_CAP) - 0.05).abs() < 1e-12);
@@ -1215,6 +1615,7 @@ mod tests {
             node_cap: NODE_CAP,
             sigma,
             trace_nodes: false,
+            lazy_discharge: false,
         }
     }
 
@@ -1288,6 +1689,18 @@ mod tests {
 
     #[test]
     fn random_small_trees_recommend_epsilon_optimal_roots() {
+        random_small_trees_pac(false);
+    }
+
+    /// Issue 916 b-lever: the same PAC smoke under the lazy-discharge
+    /// resolver — intervals and the stop are shared, so the certificate
+    /// guarantees must hold identically; only the routing differs.
+    #[test]
+    fn lazy_discharge_random_small_trees_recommend_epsilon_optimal_roots() {
+        random_small_trees_pac(true);
+    }
+
+    fn random_small_trees_pac(lazy_discharge: bool) {
         // PAC smoke (the heavy suite is T2's bench): 32 deterministic
         // D=3/b=3 trees, contract-honest envelopes (leaf fast EXACT — B(0)
         // = 0; bias 0.04 at h=2 against declared 0.12·(1−2^−2) = 0.09; bias
@@ -1326,7 +1739,11 @@ mod tests {
                 t.fast[d1 as usize] = t.exact(d1) + 0.02 * sign;
             }
             let true_best = (1..=3u32).map(|c| t.exact(c)).fold(f32::MIN, f32::max);
-            let r = two_fidelity_search(&t, 0, &search_cfg(0.1, 0.05), &mut Xs(seed + 1_000));
+            let cfg = SearchConfig {
+                lazy_discharge,
+                ..search_cfg(0.1, 0.05)
+            };
+            let r = two_fidelity_search(&t, 0, &cfg, &mut Xs(seed + 1_000));
             assert!(r.certified, "seed {seed}: must terminate certified");
             // End-to-end validity (Thm 3.1's certificate body): on honest
             // oracles every reported root interval contains the true value.
@@ -1344,6 +1761,57 @@ mod tests {
         assert!(
             errors <= 2,
             "PAC smoke: {errors} errors over 32 trees (δ = 0.05)"
+        );
+    }
+
+    /// The v1 scenario set under `lazy_discharge`: exact-oracle early exit,
+    /// single child, tie-break, the empty-intersection guard, the slow-only
+    /// route, and seed determinism.
+    #[test]
+    fn lazy_discharge_passes_the_v1_scenarios() {
+        let ld = |eps: f32, sigma: f64| SearchConfig {
+            lazy_discharge: true,
+            ..search_cfg(eps, sigma)
+        };
+        // Exact fast oracle (B ≡ 0): ρ₀ = 0, stop fires with zero samples.
+        let mut t = VecTree::new(0.0, 0.0);
+        t.push(0, NodeKind::Max, 2, 0.3, 0.3);
+        t.push(0, NodeKind::Max, 2, 0.7, 0.7);
+        let r = two_fidelity_search(&t, 0, &ld(0.01, 0.1), &mut Xs(21));
+        assert!(r.certified && r.best_action == 2 && r.cost.slow == 0);
+
+        let mut t = VecTree::new(0.0, 0.0);
+        t.push(0, NodeKind::Max, 0, 0.4, 0.4);
+        let r = two_fidelity_search(&t, 0, &ld(0.05, 0.1), &mut Xs(22));
+        assert!(r.certified && r.best_action == 1);
+
+        let mut t = VecTree::new(0.0, 0.0);
+        t.push(0, NodeKind::Max, 0, 0.5, 0.5);
+        t.push(0, NodeKind::Max, 0, 0.5, 0.5);
+        let r = two_fidelity_search(&t, 0, &ld(0.05, 0.1), &mut Xs(23));
+        assert_eq!(r.best_action, 1);
+
+        let mut t = VecTree::new(1.0, 0.1);
+        t.push(0, NodeKind::Max, 2, 10.0, 0.0);
+        t.push(0, NodeKind::Max, 2, 9.0, 9.0);
+        let r = two_fidelity_search(&t, 0, &ld(0.01, 0.1), &mut Xs(24));
+        assert!(
+            !r.certified,
+            "guard (or no-obligation exit) must not certify a liar"
+        );
+
+        let build = || {
+            let mut t = VecTree::new(1.0e6, 0.05);
+            t.push(0, NodeKind::Max, 1, 0.0, 0.2);
+            t.push(0, NodeKind::Max, 1, 0.0, 0.8);
+            t
+        };
+        let a = two_fidelity_search(&build(), 0, &ld(0.05, 0.05), &mut Xs(25));
+        assert!(a.certified && a.best_action == 2 && a.cost.slow >= 2);
+        let b = two_fidelity_search(&build(), 0, &ld(0.05, 0.05), &mut Xs(25));
+        assert_eq!(
+            (a.best_action, a.cost, a.root_intervals),
+            (b.best_action, b.cost, b.root_intervals)
         );
     }
 

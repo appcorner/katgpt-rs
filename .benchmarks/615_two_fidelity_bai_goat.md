@@ -67,3 +67,35 @@ BAI cost = the `BAI_SAMPLE_CAP` (4M samples × c = 4) — **capped 100/100**: th
 2. `cargo test -p katgpt-core --features two_fidelity_bai --lib two_fidelity_bai` (21 tests, incl. the fixture-honesty PAC smoke and the m_v reference/precomputed agreement pin)
 3. `B615_TREES=8` shakedown — the rows must be BYTE-IDENTICAL to this record's shakedown history for unchanged-protocol runs (determinism pin): 2FFS 225 386 / 987 702 / 574 838.
 4. Full protocol (default 100 trees/setting): ALL GATES PASS is the GOAT verdict. Phase 3/4 are un-gated by THIS record; a future GOAT-relevant change (e.g. Issue 916(b)'s allocation knob) re-runs steps 3–4 under its own record.
+
+## Addendum (2026-10-03) — Issue 916(b) lever: `SearchConfig::lazy_discharge`
+
+The cost debt above is closed by an opt-in resolver, ported from the authors' implementation (`github.com/PeterLauLukChen/2FFS`, `method/twoffs/twoffs.py`): parent-capped scales (`capped_scale` — a child is never certified finer than its parent's scale, the code form of Prop. B.10's `Δ_v^eff ≤ 2ρ_k`), lazy discharge in the comparison cases (Max-L / Min-U: a child outside the `ρ_k/2` margin is dropped uncertified; the live blocker's OPPOSITE side is refined first), per-(node, scale) race budgets, expansion as its own work unit. Intervals, δ_v, and the ε-stop are untouched, so PAC rides on the same argument; `lazy_discharge = false` is the v1 search bit-identically (the step-3 determinism pin below reproduces 225 386 / 987 702 / 574 838 with the knob off).
+
+Instrument: `B615_2FFS_AB=1` runs the resolver A/B alone (same trees, same per-tree seed, no baselines — the baselines do not depend on the resolver); `B615_AB_{EPS,SIGMA,COST}` override (ε, σ, c) for that mode only (σ also sets the slow noise amplitude). Deterministic — every number is a count.
+
+**Protocol regime (ε = 0.02, σ = 0.05, c = 4), 100 trees/setting:**
+
+| setting | v1 slow / fast / unified | lazy slow / fast / unified | v1 / lazy | paired LB95 (v1 − lazy) |
+|---|---|---|---|---|
+| (5,8) | 48 951 / 633 / 196 435 | 0 / 832 / 832 | 236× | +153 728 |
+| (7,6) | 269 685 / 1 596 / 1 080 335 | 0 / 2 963 / 2 963 | 365× | +939 636 |
+| (10,3) | 225 413 / 544 / 902 198 | 0 / 808 / 808 | 1117× | +720 555 |
+
+Lazy G1: **0/300 errors (CP95 0.00994 < δ = 0.05), 300/300 certified, 0 invalid certified intervals.** v1: 0/300 errors, 0 uncertified.
+
+**Hard regime (ε = 0, σ = 0.005, c = 2 — toward the paper's hard settings; our fixture's B̄ = 0.12 envelope and U[0,1] leaves are unchanged), 100 trees/setting:**
+
+| setting | v1 errs / uncertified | v1 unified | lazy errs / uncertified | lazy slow / fast / unified | v1 / lazy | paired LB95 |
+|---|---|---|---|---|---|---|
+| (5,8) | 1 / 5 | 532 713 | 0 / 0 | 8 / 870 / 887 | 601× | +219 156 |
+| (7,6) | 2 / 6 | 877 144 | 0 / 0 | 24 / 3 121 / 3 169 | 277× | +522 182 |
+| (10,3) | 0 / 1 | 181 131 | 0 / 0 | 1 / 923 / 925 | 196× | +33 181 |
+
+Lazy G1: **0/300 errors (CP95 0.00994), 300/300 certified, 0 invalid.** v1 DEGRADES here (3/300 errors, 12/300 uncertified exits) — the lazy resolver is the better-behaved arm on both axes, not just cheaper.
+
+**Reading, honestly:**
+- On this fixture the cheapest certificate is almost always the FAST route: honest envelopes plus exact leaves (B(0) = 0) let selective expansion certify the root, and lazy discharge stops paying for children that cannot change the decision. In the protocol regime the slow oracle is never queried; in the hard regime it is queried 1–24 times per tree. So this record proves the allocation lever and G1 under the new rule; it does **not** exercise a regime where slow sampling dominates (that needs a fixture whose fast envelope cannot be tightened by expansion — e.g. inexact leaves — not built here).
+- v1's waste had a visible mechanical cause besides the ladder overshoot: once a node latched all 64 scales, v1 fell through to `sample_local`, sampling nodes (exact leaves included) that were already width 0.
+- vs the paper's own 2FFS (5.39e3–1.77e4 samples) the fixtures differ (their hard trees: β = 0.45, gaps 0.002–0.012), so the numbers are not a parity claim; the 10–50× debt measured above is gone on ours.
+- The knob stays opt-in per Issue 916's rule (a confidence-allocation change is never silent). It is the **recommended** setting; the example uses it. The gated suite here still records v1 by default (`B615_2FFS_LAZY=1` switches the suite's 2FFS arm); G2 vs the baselines can only widen under lazy, since its cost is 196–1117× lower at equal G1.

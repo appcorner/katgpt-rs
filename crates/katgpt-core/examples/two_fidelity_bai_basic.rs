@@ -164,6 +164,9 @@ fn main() {
         node_cap: 65_536,
         sigma: 0.05,
         trace_nodes: false,
+        // Recommended (Issue 916(b), Bench 615 addendum): same PAC guarantee,
+        // 196–1117× lower cost than the v1 resolver on the bench fixture.
+        lazy_discharge: true,
     };
 
     println!("true root value: {:.4}", tree.vstar[0]);
