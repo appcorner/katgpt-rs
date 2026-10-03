@@ -3,7 +3,7 @@
 **Status:** ACTIVE — Phase 0 (gate designs only until measured)
 **Date:** 2026-10-03
 **Research:** [../riir-refine/.research/233_Percepta_Spotlight_Growing_Memory.md](../riir-refine/.research/233_Percepta_Spotlight_Growing_Memory.md) (the distill note — this plan is its track-(a) upstream half)
-**Consumer plan:** [../riir-refine/.plans/198_spotlight_lattice_wasm_capability_lane.md](../riir-refine/.plans/198_spotlight_lattice_wasm_capability_lane.md) (healer consumption + WASM lane live THERE; this plan owns only the katgpt-core primitive + its bench)
+**Consumer plan:** [../riir-refine/.plans/199_spotlight_lattice_wasm_capability_lane.md](../riir-refine/.plans/199_spotlight_lattice_wasm_capability_lane.md) (healer consumption + WASM lane live THERE; this plan owns only the katgpt-core primitive + its bench)
 **Source:** Percepta "Spotlight Memory" blog 2026-10-02 (lattice-of-delta-cells class: SDM arXiv:2607.07386, MARCH 2608.12435, Memory Layers 2412.09764 are the published lineage; our form is deterministic, no GD)
 **Target:** `crates/katgpt-core/src/lattice_memory/` (new module) + Cargo feature `lattice_memory`
 **Substrate duties:** the seeded projection + `seed_from_config` logic MOVES DOWN into `katgpt-core` (small shared module) and `katgpt-pruners/src/lsh_cache.rs` re-exports it — `katgpt-pruners` already depends on `katgpt-core` (its Cargo.toml), so the down-move is cycle-free and the reverse dep would be a cycle; never a second copy of the ~40 LOC. **Name disambiguation:** this module is NOT `analytic_lattice` (Plan 330 transport operators — unrelated).
@@ -32,7 +32,7 @@ Ship the deterministic (modelless) extraction of Spotlight's addressing math: a 
 ### Tasks
 
 - [ ] **T2.1** Per-stack ledger entry: retrieval/memory slot — promote/demote vs PKM/Engram per T1.7; README feature row + `.docs/03_memory/` page.
-- [ ] **T2.2** Consumer wiring (traj/insight evidence memory) is owned by riir-refine Plan 198 Phase 2 — no healer code in this repo; GOAT-gate results cross-referenced there.
+- [ ] **T2.2** Consumer wiring (traj/insight evidence memory) is owned by riir-refine Plan 199 Phase 2 — no healer code in this repo; GOAT-gate results cross-referenced there.
 
 ## Guardrails
 
