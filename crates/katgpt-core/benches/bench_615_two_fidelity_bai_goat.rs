@@ -105,7 +105,18 @@ const NOISE_AMP: f32 = 0.05;
 /// nondecreasing in remaining depth (root loosest). |bias| = B(h)·u ≤ B(h).
 const BBAR: f32 = 0.12;
 const SETTINGS: [(u8, usize); 3] = [(5, 8), (7, 6), (10, 3)];
-const BAI_SAMPLE_CAP: u64 = 30_000_000;
+/// Stopping-failure cap for the δ-correct LUCB-MCTS baseline (Issue 916a):
+/// where it cannot certify within the cap, the cap × c IS its recorded cost
+/// (the conservative understatement — the same convention as the UCT
+/// no-checkpoint-matched row). Sized 2026-10-03: 4M = 4× the paper's own
+/// BAI instance at (5,8) (8.8e5), so "our baseline is the conservative
+/// member of the class" stays honest, while a full-protocol recording run
+/// stays ≈1.5 h on this box (the first 30M-cap attempt measured setting 1
+/// at ~10 h projected wall — the Min-arm L-fan-out (b^D/2 nodes, each
+/// needing a CI-converged leaf) caps every D≥7 tree structurally, so the
+/// cap only sets the disclosed understatement magnitude, never a verdict
+/// flip; the 30M setting-1 rows are in the record as corroboration).
+const BAI_SAMPLE_CAP: u64 = 4_000_000;
 const UCT_MAX_BUDGET: u64 = 1 << 23;
 const UCT_C: f64 = std::f64::consts::SQRT_2;
 
@@ -842,7 +853,7 @@ fn dump_2ffs_trace(results: &[TwoFidelityResult], d: u8, b: u8) {
             top.push((st.slow_n, st.node, st.depth, st.target_width));
         }
     }
-    top.sort_by(|a, b| b.0.cmp(&a.0));
+    top.sort_by_key(|&(n, _, _, _)| std::cmp::Reverse(n));
     top.truncate(8);
     for (n, node, depth, w) in top {
         eprintln!("        top node {node} (depth {depth}): {n} samples, target width {w:.5}");
