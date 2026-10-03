@@ -508,19 +508,27 @@ pub fn keyed_gumbel_max_sample(logits: &[f32], seed: u64, position: u64) -> u32 
 }
 
 /// The keep-mask for a truncated sampler: `true` = the token is eligible.
-/// `top_k` keeps the `k` highest logits (ties keep the EARLIER index first —
-/// the `top_k_desc` convention); `top_p` then keeps the smallest
-/// descending-logit prefix of those whose cumulative softmax mass reaches
-/// `p` (inclusive of the crossing token; the first token is always kept, so
-/// the mask is never empty). `None` on either axis leaves it unfiltered.
-/// The HF composition order — top-k first, then top-p within the survivors —
-/// so a combined (k, p) set is never wider than either filter alone.
+/// Composition order is the deployment incumbent's (llama.cpp's sampling
+/// chain): **top-k first, then top-p over the SURVIVORS** — the top-p
+/// denominator is the survivors' softmax mass at T=1, and the temperature
+/// applies after truncation (the masked sampler scales survivors only, so
+/// mask → scale is order-equivalent). Normalising against the full row
+/// instead would make the nucleus strictly WIDER than the incumbent's —
+/// the tail mass dilutes the survivors' shares. `top_k` keeps the `k`
+/// highest finite logits (ties keep the EARLIER index first — the
+/// `top_k_desc` convention); `top_p` keeps the smallest descending-logit
+/// prefix of the survivors whose cumulative survivor mass reaches `p`
+/// (inclusive of the crossing token; the first survivor is always kept, so
+/// the mask is never empty when any finite logit exists). `None` on either
+/// axis leaves it unfiltered.
 ///
-/// Deterministic by construction: one (logit desc, index asc) sort, fixed
-/// accumulation order. `-inf` logits contribute zero mass; `NaN` logits
-/// never accumulate and never rank first (their comparisons are false), so
-/// a NaN-poisoned row degrades to the surviving prefix rather than an
-/// empty or arbitrary mask. The full-vocab sort is O(v log v) — the
+/// NaN and ±inf logits are never eligible: they cannot rank, contribute no
+/// mass, and are never marked (an infinite logit is never a legitimate
+/// model output, and a NaN that ranked would poison the whole softmax —
+/// `total_cmp` sorts +NaN above +inf, so an unguarded NaN would silently
+/// degrade the mask to top-k-only). A row with no finite logits yields an
+/// all-false mask; the masked sampler's first-index convention then picks
+/// token 0 deterministically. The full-vocab sort is O(v log v) — the
 /// Phase-2 correctness posture accepts it (the keyed sample itself is
 /// already a full scan); the Phase-3 GPU sampler replaces both.
 pub fn truncation_keep_mask(
@@ -533,32 +541,38 @@ pub fn truncation_keep_mask(
     if v == 0 {
         return mask;
     }
-    let mut order: Vec<u32> = (0..v as u32).collect();
+    let mut order: Vec<u32> = (0..v as u32)
+        .filter(|&i| logits[i as usize].is_finite())
+        .collect();
+    if order.is_empty() {
+        return mask;
+    }
     order.sort_unstable_by(|&a, &b| {
         logits[b as usize]
             .total_cmp(&logits[a as usize])
             .then(a.cmp(&b))
     });
-    let k = top_k.unwrap_or(v).clamp(1, v);
-    // Softmax denominator over the full row (the mass the top-p prefix is
-    // measured against — the deployment semantics, not survivors-only).
     let max = logits[order[0] as usize];
+    let k_keep = top_k.map_or(order.len(), |k| k.clamp(1, order.len()));
+    // The top-p denominator is the SURVIVORS' mass (the incumbent's
+    // chain: top-k first, then top-p within).
     let mut sum = 0.0f32;
-    for &i in order.iter() {
+    for &i in order.iter().take(k_keep) {
         sum += (logits[i as usize] - max).exp();
     }
     let p = top_p.unwrap_or(1.0).clamp(0.0, 1.0);
     let mut kept = 0usize;
     let mut cum = 0.0f32;
-    let k_keep = if top_k.is_some() { k } else { v };
-    for (rank, &i) in order.iter().enumerate() {
+    for &i in order.iter().take(k_keep) {
         mask[i as usize] = true;
         kept += 1;
-        cum += (logits[i as usize] - max).exp() / sum;
-        // Stop at k survivors, or once the nucleus mass is reached — the
+        if top_p.is_some() {
+            cum += (logits[i as usize] - max).exp() / sum;
+        }
+        // Stop at k survivors, or once the survivor mass is reached — the
         // LAST survivor is always kept, which also absorbs the f32 case
         // where the accumulated mass stalls a hair under p.
-        if kept >= k_keep || (kept > 0 && cum >= p) || rank + 1 == v {
+        if kept >= k_keep || (top_p.is_some() && cum >= p) {
             break;
         }
     }
@@ -570,11 +584,11 @@ pub fn truncation_keep_mask(
 /// argmax (the Plan-614 Phase-2 contract order — mask, scale, sample), so
 /// their keys are never consulted and the pick is always inside the
 /// deployment nucleus. `temperature <= 0` is the greedy posture: the plain
-/// argmax over the survivors, no noise at all. `keep` shorter than
-/// `logits` masks nothing beyond its length is NOT honored — a length
-/// mismatch returns `0` (the defensive convention of the unmasked
-/// sampler's empty input), because a silent full-vocab fallback would
-/// sample outside the caller's intended support.
+/// argmax over the survivors, no noise at all. A `keep` whose length
+/// differs from `logits` is a caller bug → returns `0` (the defensive
+/// convention of the unmasked sampler's empty input), never a silent
+/// full-vocab fallback that would sample outside the caller's intended
+/// support.
 #[inline]
 pub fn keyed_gumbel_max_sample_masked(
     logits: &[f32],
@@ -1079,15 +1093,61 @@ mod tests {
         assert_eq!(mp95, vec![false, true, true, false, true]);
         let mtiny = truncation_keep_mask(&logits, None, Some(1e-6));
         assert_eq!(mtiny, vec![false, true, false, false, false]);
-        // Combined: top-k=2 first, then top-p within the survivors — the
-        // set is the intersection shape (here the top-2 by the tie rule).
+        // Combined: top-k=2 first, then top-p over the survivors — the
+        // first survivor already carries 0.5 of the SURVIVOR mass, so the
+        // p=0.5 nucleus stops at one token (the crossing token inclusive).
         let mc = truncation_keep_mask(&logits, Some(2), Some(0.5));
-        assert_eq!(mc, vec![false, true, true, false, false]);
+        assert_eq!(mc, vec![false, true, false, false, false]);
         // No filters: everything eligible.
         let mall = truncation_keep_mask(&logits, None, None);
         assert!(mall.iter().all(|&b| b));
         // Empty row: empty mask (and the masked sampler's 0 convention).
         assert!(truncation_keep_mask(&[], Some(3), Some(0.9)).is_empty());
+    }
+
+    #[test]
+    fn truncation_keep_mask_survivor_normalized_top_p_matches_the_incumbent_chain() {
+        // The llama.cpp chain: top-k → top-p over the SURVIVORS at T=1.
+        // This row discriminates the two denominators: survivors {5.0,
+        // 4.0, 4.0} renormalise to 0.576/0.212/0.212, so p=0.7 keeps TWO
+        // (cum 0.788 at the second); the full-row denominator (with the
+        // 5×3.0 tail diluting) gives 0.414/0.152/0.152, cum 0.719 at the
+        // third — a full-row mask would keep THREE. The survivor order is
+        // the deployment incumbent's; pinning it.
+        let logits = [5.0f32, 4.0, 4.0, 3.0, 3.0, 3.0, 3.0, 3.0];
+        let m = truncation_keep_mask(&logits, Some(3), Some(0.7));
+        assert_eq!(
+            m,
+            vec![true, true, false, false, false, false, false, false],
+            "top-p must normalise over the top-k survivors, not the full row"
+        );
+        // p-alone (k = None): the survivor set is the whole finite row, so
+        // the denominator is the full row's — unchanged behaviour there.
+        let base = [1.0f32, 5.0, 5.0, 0.5, 3.0];
+        let mp = truncation_keep_mask(&base, None, Some(0.9));
+        assert_eq!(mp, vec![false, true, true, false, false]);
+    }
+
+    #[test]
+    fn truncation_keep_mask_never_marks_non_finite_logits() {
+        // A NaN that ranked would poison the softmax (total_cmp sorts +NaN
+        // above +inf, so the unguarded max would be NaN and top-p would
+        // never fire); a ±inf logit is never a legitimate output. Both are
+        // ineligible: no mass, no mark.
+        let logits = [f32::NAN, 5.0, 1.0, f32::NEG_INFINITY];
+        let m = truncation_keep_mask(&logits, None, Some(0.5));
+        assert_eq!(m, vec![false, true, false, false]);
+        // All-non-finite: nothing eligible → all false (the masked
+        // sampler's first-index convention then picks token 0).
+        let bad = [f32::NAN, f32::NEG_INFINITY, f32::INFINITY];
+        assert!(truncation_keep_mask(&bad, Some(2), Some(0.9)).iter().all(|&b| !b));
+        // The masked sampler on the NaN row with the survivor mask: picks
+        // the survivor (the NaN, even masked, could never win — NaN > x is
+        // false — but the mask keeps the pick inside the nucleus).
+        assert_eq!(
+            keyed_gumbel_max_sample_masked(&logits, 9, 3, 0.6, &m),
+            1
+        );
     }
 
     #[test]
