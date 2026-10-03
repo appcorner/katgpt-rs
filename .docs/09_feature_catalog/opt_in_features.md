@@ -5319,3 +5319,35 @@ riir-ai `MultiHypothesisBoMMinimaxPlanner` certified stopping (the seam
 issue cites Research 601 + this bench); watch: riir-instinct
 critic-guided search, riir-infer kernel-trial early-stop (Research 601
 §2.2).
+
+## 141. entropy_bounded_commit — EB-Sampler-Class Entropy-Bounded Commitment (Issue 917 T1)
+
+Feature-gated behind `entropy_bounded_commit` (opt-in). Zero novelty claimed:
+the rule is the EB-Sampler's (Ben-Hamu et al.,
+[arXiv:2505.24857](https://arxiv.org/abs/2505.24857), NeurIPS 2025,
+Algorithm 1 / Eq. 8; same family as PC-Sampler, APD and the DiffusionGemma
+report's `entropy budget b`). Sort the still-masked candidates by an error
+proxy (`ErrorProxy::{Entropy, Confidence, Margin}`) and commit the largest
+prefix with `Σ H − max H ≤ γ`, a bound on the joint-dependence error of a
+parallel commit under a factorized proposal.
+
+- `entropy_bounded_commit(candidates, entropy, key, gamma, max_commit)`:
+  sorts the caller's candidate buffer in place under a strict total order
+  `(NaN-last, key, index)`, then one linear scan. The residual is monotone
+  (appending `h` adds `min(h, running max)`) and carried in that exact
+  incremental form, not as `sum − max`. A cap below the candidate count
+  uses `select_nth_unstable` + a head sort.
+- No-stall by construction: for any `γ ≥ 0` a singleton's residual is 0, so
+  every pass with a finite-entropy candidate commits ≥ 1. The incumbent
+  per-position τ threshold (`confidence_threshold_eligible`) can commit
+  nothing on a flat canvas. Non-finite entropy and NaN/negative `γ` never
+  commit.
+- `position_stats` / `position_stats_into`: entropy, top-1 and margin per
+  logits row via the shared `simd::logsumexp_parts` kernel plus a top-2 scan.
+- Measured (M3 Max on AC, single run, box shared with sibling agent sessions, `--release`, `entropy_bounded_commit_alloc_check`):
+  0 bytes allocated in steady state; 64-candidate commit 757 ns full sort,
+  253 ns capped at 8; stats 1.25 ms per 64 × 4096 block (exp-bound; the
+  D2F integration should reuse its existing softmax buffer instead).
+- Promotion pending Issue 917 T2/T3: the A/B against the incumbent commit
+  policy on the D2F τ_conf, DDTree width-k and DFlash block-commit lanes
+  (G2 NFE at matched quality, G3 no quality regression).
