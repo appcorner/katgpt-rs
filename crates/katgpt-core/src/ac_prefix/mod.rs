@@ -78,6 +78,9 @@ pub use types::{AcPrefix, AcPrefixMask};
 // The keyed-Gumbel verify-sampling pair (position-keyed noise — the
 // order-invariant shared stream drafter proposals and target verify
 // samples consume; Plan-614 substrate row).
-pub use types::{keyed_gumbel_max_sample, keyed_gumbel_noise};
+pub use types::{
+    keyed_gumbel_max_sample, keyed_gumbel_max_sample_masked, keyed_gumbel_max_sample_truncated,
+    keyed_gumbel_noise, truncation_keep_mask,
+};
 
 pub(crate) use types::gumbel_max_sample;

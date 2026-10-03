@@ -507,6 +507,128 @@ pub fn keyed_gumbel_max_sample(logits: &[f32], seed: u64, position: u64) -> u32 
     best_idx as u32
 }
 
+/// The keep-mask for a truncated sampler: `true` = the token is eligible.
+/// `top_k` keeps the `k` highest logits (ties keep the EARLIER index first —
+/// the `top_k_desc` convention); `top_p` then keeps the smallest
+/// descending-logit prefix of those whose cumulative softmax mass reaches
+/// `p` (inclusive of the crossing token; the first token is always kept, so
+/// the mask is never empty). `None` on either axis leaves it unfiltered.
+/// The HF composition order — top-k first, then top-p within the survivors —
+/// so a combined (k, p) set is never wider than either filter alone.
+///
+/// Deterministic by construction: one (logit desc, index asc) sort, fixed
+/// accumulation order. `-inf` logits contribute zero mass; `NaN` logits
+/// never accumulate and never rank first (their comparisons are false), so
+/// a NaN-poisoned row degrades to the surviving prefix rather than an
+/// empty or arbitrary mask. The full-vocab sort is O(v log v) — the
+/// Phase-2 correctness posture accepts it (the keyed sample itself is
+/// already a full scan); the Phase-3 GPU sampler replaces both.
+pub fn truncation_keep_mask(
+    logits: &[f32],
+    top_k: Option<usize>,
+    top_p: Option<f32>,
+) -> Vec<bool> {
+    let v = logits.len();
+    let mut mask = vec![false; v];
+    if v == 0 {
+        return mask;
+    }
+    let mut order: Vec<u32> = (0..v as u32).collect();
+    order.sort_unstable_by(|&a, &b| {
+        logits[b as usize]
+            .total_cmp(&logits[a as usize])
+            .then(a.cmp(&b))
+    });
+    let k = top_k.unwrap_or(v).clamp(1, v);
+    // Softmax denominator over the full row (the mass the top-p prefix is
+    // measured against — the deployment semantics, not survivors-only).
+    let max = logits[order[0] as usize];
+    let mut sum = 0.0f32;
+    for &i in order.iter() {
+        sum += (logits[i as usize] - max).exp();
+    }
+    let p = top_p.unwrap_or(1.0).clamp(0.0, 1.0);
+    let mut kept = 0usize;
+    let mut cum = 0.0f32;
+    let k_keep = if top_k.is_some() { k } else { v };
+    for (rank, &i) in order.iter().enumerate() {
+        mask[i as usize] = true;
+        kept += 1;
+        cum += (logits[i as usize] - max).exp() / sum;
+        // Stop at k survivors, or once the nucleus mass is reached — the
+        // LAST survivor is always kept, which also absorbs the f32 case
+        // where the accumulated mass stalls a hair under p.
+        if kept >= k_keep || (kept > 0 && cum >= p) || rank + 1 == v {
+            break;
+        }
+    }
+    mask
+}
+
+/// [`keyed_gumbel_max_sample`] over a truncated distribution: `keep[i]
+/// == false` tokens are masked BEFORE the temperature scale and the keyed
+/// argmax (the Plan-614 Phase-2 contract order — mask, scale, sample), so
+/// their keys are never consulted and the pick is always inside the
+/// deployment nucleus. `temperature <= 0` is the greedy posture: the plain
+/// argmax over the survivors, no noise at all. `keep` shorter than
+/// `logits` masks nothing beyond its length is NOT honored — a length
+/// mismatch returns `0` (the defensive convention of the unmasked
+/// sampler's empty input), because a silent full-vocab fallback would
+/// sample outside the caller's intended support.
+#[inline]
+pub fn keyed_gumbel_max_sample_masked(
+    logits: &[f32],
+    seed: u64,
+    position: u64,
+    temperature: f32,
+    keep: &[bool],
+) -> u32 {
+    if logits.is_empty() || keep.len() != logits.len() {
+        return 0;
+    }
+    if temperature <= 0.0 {
+        let mut best_idx = 0usize;
+        let mut best = f32::NEG_INFINITY;
+        for (i, (&l, &k)) in logits.iter().zip(keep.iter()).enumerate() {
+            if k && l > best {
+                best = l;
+                best_idx = i;
+            }
+        }
+        return best_idx as u32;
+    }
+    let inv_t = 1.0 / temperature;
+    let mut best_idx = 0usize;
+    let mut best_score = f32::NEG_INFINITY;
+    for (i, (&l, &k)) in logits.iter().zip(keep.iter()).enumerate() {
+        if !k {
+            continue;
+        }
+        let score = l * inv_t + keyed_gumbel_noise(seed, position, i as u32);
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+    best_idx as u32
+}
+
+/// The one-call composition the verify loop uses: [`truncation_keep_mask`]
+/// then [`keyed_gumbel_max_sample_masked`] at the deployment temperature.
+/// Sampling from `softmax(logits/T)` restricted to the (top-k, top-p)
+/// nucleus; `temperature <= 0` is the greedy posture over the survivors.
+pub fn keyed_gumbel_max_sample_truncated(
+    logits: &[f32],
+    seed: u64,
+    position: u64,
+    temperature: f32,
+    top_k: Option<usize>,
+    top_p: Option<f32>,
+) -> u32 {
+    let keep = truncation_keep_mask(logits, top_k, top_p);
+    keyed_gumbel_max_sample_masked(logits, seed, position, temperature, &keep)
+}
+
 /// Bit-packed attention mask for the augmented sequence.
 ///
 /// Layout: `augmented_len × augmented_len` bits, row-major. The bit at offset
@@ -935,6 +1057,87 @@ mod tests {
         }
         // Empty input → 0 (matches `gumbel_max_sample`).
         assert_eq!(keyed_gumbel_max_sample(&[], 1, 1), 0);
+    }
+
+    #[test]
+    fn truncation_keep_mask_topk_topp_and_combination() {
+        let logits = [1.0f32, 5.0, 5.0, 0.5, 3.0];
+        // top-k=3: the three highest — ties keep the earlier index first, so
+        // both 5.0s and the 3.0 survive, never the 1.0.
+        let m = truncation_keep_mask(&logits, Some(3), None);
+        assert_eq!(m, vec![false, true, true, false, true]);
+        // top-k=1: exactly the argmax (earlier index on ties).
+        let m1 = truncation_keep_mask(&logits, Some(1), None);
+        assert_eq!(m1, vec![false, true, false, false, false]);
+        // top-p alone: the two 5.0s carry e⁰+e⁰ / (sum) ≈ 0.924 of the
+        // softmax mass — a p=0.9 nucleus stops there; p=0.95 pulls in the
+        // 3.0 (cum 0.987) but never the 0.5/1.0 tail. The argmax always
+        // keeps at least one token even at extreme p.
+        let mp = truncation_keep_mask(&logits, None, Some(0.9));
+        assert_eq!(mp, vec![false, true, true, false, false]);
+        let mp95 = truncation_keep_mask(&logits, None, Some(0.95));
+        assert_eq!(mp95, vec![false, true, true, false, true]);
+        let mtiny = truncation_keep_mask(&logits, None, Some(1e-6));
+        assert_eq!(mtiny, vec![false, true, false, false, false]);
+        // Combined: top-k=2 first, then top-p within the survivors — the
+        // set is the intersection shape (here the top-2 by the tie rule).
+        let mc = truncation_keep_mask(&logits, Some(2), Some(0.5));
+        assert_eq!(mc, vec![false, true, true, false, false]);
+        // No filters: everything eligible.
+        let mall = truncation_keep_mask(&logits, None, None);
+        assert!(mall.iter().all(|&b| b));
+        // Empty row: empty mask (and the masked sampler's 0 convention).
+        assert!(truncation_keep_mask(&[], Some(3), Some(0.9)).is_empty());
+    }
+
+    #[test]
+    fn keyed_masked_sampler_matches_the_unmasked_on_a_full_mask() {
+        let logits: Vec<f32> = (0..32).map(|i| (i as f32) * 0.41 - 6.0).collect();
+        let all = vec![true; 32];
+        for p in 0..50u64 {
+            assert_eq!(
+                keyed_gumbel_max_sample_masked(&logits, 77, p, 0.7, &all),
+                // The unmasked sampler is the masked one at temperature 1;
+                // pre-scaled logits reproduce it exactly (the composition
+                // the Phase-2 target side and the drafter's walk share).
+                keyed_gumbel_max_sample(
+                    &logits.iter().map(|&l| l / 0.7).collect::<Vec<_>>(),
+                    77,
+                    p
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn keyed_masked_sampler_respects_the_mask_and_greedy_posture() {
+        let logits = [-1000.0f32, 1000.0, 999.0, -1000.0];
+        // Masked argmax survives: token 1 masked out → token 2 (the argmax
+        // of the survivors) is the keyed pick at every position, because the
+        // logit gap to the rest dwarfs the noise bound.
+        let keep = [false, false, true, true];
+        for p in 0..100u64 {
+            assert_eq!(
+                keyed_gumbel_max_sample_masked(&logits, 5, p, 0.6, &keep),
+                2
+            );
+        }
+        // temperature <= 0: the plain argmax over survivors, NO noise —
+        // bit-stable for any seed/position and equal to the T→0 limit arm.
+        assert_eq!(
+            keyed_gumbel_max_sample_masked(&logits, 5, 42, 0.0, &keep),
+            2
+        );
+        assert_eq!(
+            keyed_gumbel_max_sample_masked(&logits, 9, 7, -1.0, &keep),
+            2
+        );
+        // A keep row shorter than the logits is a caller bug → 0, never a
+        // silent full-vocab fallback outside the intended support.
+        assert_eq!(keyed_gumbel_max_sample_masked(&logits, 5, 42, 0.6, &[true]), 0);
+        // The one-call composition equals mask-then-sample.
+        let truncated = keyed_gumbel_max_sample_truncated(&logits, 5, 41, 0.6, Some(1), None);
+        assert_eq!(truncated, 1);
     }
 
     #[test]
