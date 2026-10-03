@@ -5268,3 +5268,54 @@ Record: [Bench 905](../../.benchmarks/905_grouped_evidence_weighting_goat.md).
 `best_belief` + `rating`), **OPT-IN** — consumers unscheduled (riir-clippy
 Issue 139, riir-dao, riir-reflex, riir-instinct, riir-ai rows in the issue).
 Kill clock: no consumer within 30 days of merge ⇒ goat-audit stall class.
+
+## 140. two_fidelity_bai — Certified Two-Fidelity Best-Action Identification (2FFS) (Plan 615 / Research 601)
+
+Certified best-action identification for stochastic minimax trees where
+every node answers to a **fast oracle** (deterministic, biased within a
+known envelope `B(h)`, B(0) = 0 leaf-exact) or a **slow oracle** (stochastic,
+unbiased, σ-sub-Gaussian). Interval minimax backup (`local = fast ∩
+time-uniform slow CI`; `effective = local ∩ child` via the Eq. 6 fold —
+width never increases, Lemma 2.3 debug-asserted at every backup),
+leader/challenger ε-stop at the root, a budgeted local-vs-recursive race
+(Eq. 7 `γ = c·m_v(ρ_k)` scaled `α_h = (h+1)²`), dyadic scale latches
+(`Done_s(v,k)` — zero rework), and the empty-intersection guard
+detectable-E_δ exit (paper B.3). The certificate is first-class output:
+`TwoFidelityResult { best_action, cost, certified, root_intervals }`.
+Time-uniform slow CIs by geometric-stage stitching (Howard et al. class);
+δ_v = δ/node_cap uniform allocation (T1.4's documented tradeoff).
+
+```rust
+use katgpt_core::two_fidelity_bai::{two_fidelity_search, MinimaxSpace, SearchConfig};
+let r = two_fidelity_search(&space, root, &config, &mut rng);
+if r.certified {
+    // r.best_action is ε-optimal with confidence 1−δ; r.root_intervals
+    // is the certificate body (every interval provably contains V* on E_δ).
+}
+```
+
+GOAT (Bench 615, rewritten 2026-10-03 after the fixture root cause): the
+definitive full-protocol run (n = 300, 100 trees × 3 settings, ε = 0.02,
+δ = 0.05) reads **ALL GATES PASS** — G1: 0/300 pick errors (CP95 =
+0.00994 ≤ δ), 300/300 certified, 0 invalid certificate intervals, 0
+guard-fires; G2 strict wins vs the δ-correct LUCB-MCTS baseline (LB95 ≈
++15M/setting, the baseline capping at the 4M-sample cap — conservative-
+instance caveat in the record) and vs negamax-UCT at matched accuracy (B*
+= 33.5M vs 2FFS ≤ 1.08M); G4 alloc-linearity ✓. Cost caveat: the 916(b)
+trace attributes a ~10–50× cost debt vs the paper's own 2FFS instance
+(ladder overshoot, stage-δ halving, a-priori dilution — lever recorded,
+opt-in knob discipline). Deterministic per seed (byte-identical rows
+across independent builds).
+
+Record: [`.benchmarks/615_two_fidelity_bai_goat.md`](../../.benchmarks/615_two_fidelity_bai_goat.md)
+(the arc: the 906 negative → the fixture root cause → the 916a baseline
+rebuild → the wall-viable instrument).
+
+🔧 Feature flag: `two_fidelity_bai` (katgpt-core), **OPT-IN** — the
+certified-search slot (the default search slot keeps `mcts_search`;
+promotion to default was never the claim — strategic-tier primitive, the
+op-count evidence forbids per-tick wiring). Consumer map (Phase 3):
+riir-ai `MultiHypothesisBoMMinimaxPlanner` certified stopping (the seam
+issue cites Research 601 + this bench); watch: riir-instinct
+critic-guided search, riir-infer kernel-trial early-stop (Research 601
+§2.2).
