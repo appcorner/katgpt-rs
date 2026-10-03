@@ -5345,9 +5345,14 @@ parallel commit under a factorized proposal.
 - `position_stats` / `position_stats_into`: entropy, top-1 and margin per
   logits row via the shared `simd::logsumexp_parts` kernel plus a top-2 scan.
 - Measured (M3 Max on AC, single run, box shared with sibling agent sessions, `--release`, `entropy_bounded_commit_alloc_check`):
-  0 bytes allocated in steady state; 64-candidate commit 757 ns full sort,
-  253 ns capped at 8; stats 1.25 ms per 64 × 4096 block (exp-bound; the
-  D2F integration should reuse its existing softmax buffer instead).
+  0 bytes allocated in steady state; 64-candidate commit 0.76–0.96 µs full
+  sort, ~250 ns capped at 8; stats 1.05–1.25 ms per 64 × 4096 block (two
+  runs, a mean-of-1000 and a best-of-2000 — read as a range; exp-bound, so
+  the D2F integration should reuse its existing softmax buffer instead).
+- Oracle A/B (Bench 917, exact oracle denoiser, deterministic): no-stall on
+  every family; at equal validity 5–19% fewer NFE than the τ = 0.9 incumbent
+  given a singleton floor (shipped D2F τ has none and stalls on a flat
+  canvas); the bound costs 16× NFE on genuinely independent positions.
 - Promotion pending Issue 917 T2/T3: the A/B against the incumbent commit
   policy on the D2F τ_conf, DDTree width-k and DFlash block-commit lanes
   (G2 NFE at matched quality, G3 no quality regression).

@@ -3700,6 +3700,14 @@ required-features = ["regime_probe"]
 name = "entropy_bounded_commit_alloc_check"
 required-features = ["entropy_bounded_commit"]
 
+# Issue 917 modelless oracle A/B — EB(γ) vs fixed-k vs the incumbent τ
+# threshold against an exact oracle denoiser (uniform over a finite valid
+# set; validity = joint-dependence error made decidable). Deterministic,
+# seeded, no timing. Record: .benchmarks/917_entropy_bounded_commit_goat.md.
+[[test]]
+name = "bench_917_entropy_bounded_commit_goat"
+required-features = ["entropy_bounded_commit"]
+
 # ── katgpt-rs Issue 742: arm the auto-discovered gated targets ───────────────
 # Each target below opens a whole-file `#![cfg(feature = ...)]` and had NO
 # `[[test]]` row, so `cargo test --test <name>` without its features compiled

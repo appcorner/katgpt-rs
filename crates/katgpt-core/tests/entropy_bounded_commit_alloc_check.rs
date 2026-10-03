@@ -9,6 +9,9 @@
 //! - `entropy_bounded_commit_stats` full-sort and capped (partial-selection)
 //!   paths over 64 candidates (×1000 each)
 //!
+//! Then reports best-of-N latency through the shared `best_of_us` harness
+//! (loud zero when the optimiser deletes the work); not gated.
+//!
 //! ```sh
 //! cargo test -p katgpt-core --features entropy_bounded_commit \
 //!   --test entropy_bounded_commit_alloc_check --release -- --nocapture
@@ -21,6 +24,10 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+#[path = "../../../tests/common/ab_timing.rs"]
+mod ab_timing;
+use ab_timing::best_of_us;
 
 struct CountingAllocator {
     inner: System,
@@ -84,44 +91,57 @@ fn eb_commit_steady_state_is_alloc_free() {
     let k0 = entropy_bounded_commit_stats(&mut cand, &stats, &mut hs, &mut ks, &full);
     assert!(k0 >= 1, "no-stall liveness");
 
+    // Allocation audit: plain loops, no timing inside the counted region.
+    let mut acc = 0usize;
     let before = allocated_bytes();
-    let t = Instant::now();
     for _ in 0..100 {
         position_stats_into(black_box(&logits), POS, VOCAB, &mut stats);
     }
-    let stats_ns = t.elapsed().as_nanos() as f64 / 100.0;
-    let mut acc = 0usize;
-    let t = Instant::now();
-    for _ in 0..1000 {
-        for (i, c) in cand.iter_mut().enumerate() {
-            *c = i as u32;
+    for cfg in [&full, &capped] {
+        for _ in 0..1000 {
+            for (i, c) in cand.iter_mut().enumerate() {
+                *c = i as u32;
+            }
+            acc +=
+                entropy_bounded_commit_stats(&mut cand, black_box(&stats), &mut hs, &mut ks, cfg);
         }
-        acc += entropy_bounded_commit_stats(&mut cand, black_box(&stats), &mut hs, &mut ks, &full);
     }
-    let full_ns = t.elapsed().as_nanos() as f64 / 1000.0;
-    let t = Instant::now();
-    for _ in 0..1000 {
-        for (i, c) in cand.iter_mut().enumerate() {
-            *c = i as u32;
-        }
-        acc +=
-            entropy_bounded_commit_stats(&mut cand, black_box(&stats), &mut hs, &mut ks, &capped);
-    }
-    let capped_ns = t.elapsed().as_nanos() as f64 / 1000.0;
     let after = allocated_bytes();
     black_box(acc);
-
-    println!(
-        "position_stats_into {POS}x{VOCAB}: {stats_ns:.0} ns/block; \
-         commit full: {full_ns:.0} ns; capped(8): {capped_ns:.0} ns; k0 = {k0}"
-    );
     assert!(
         acc >= 2000,
-        "every pass committed ≥ 1 (liveness of the timed loops)"
+        "every pass committed ≥ 1 (liveness of the audited loops)"
     );
     assert_eq!(
         after - before,
         0,
         "EB commit steady state must not allocate"
+    );
+
+    // Latency (reported, not gated): the shared `best_of_us` harness panics
+    // if a timed call measures 0 ns (the optimiser deleting the work).
+    let stats_us = best_of_us(3, 20, || {
+        let t = Instant::now();
+        position_stats_into(black_box(&logits), POS, VOCAB, &mut stats);
+        black_box(&stats);
+        t.elapsed()
+    });
+    let mut time_commit = |cfg: &EbCommitConfig| {
+        best_of_us(100, 2000, || {
+            for (i, c) in cand.iter_mut().enumerate() {
+                *c = i as u32;
+            }
+            let t = Instant::now();
+            let k =
+                entropy_bounded_commit_stats(&mut cand, black_box(&stats), &mut hs, &mut ks, cfg);
+            black_box(k);
+            t.elapsed()
+        })
+    };
+    let full_ns = time_commit(&full) * 1000.0;
+    let capped_ns = time_commit(&capped) * 1000.0;
+    println!(
+        "position_stats_into {POS}x{VOCAB}: {stats_us:.0} µs/block (best of 20); \
+         commit full: {full_ns:.0} ns; capped(8): {capped_ns:.0} ns (best of 2000); k0 = {k0}"
     );
 }
