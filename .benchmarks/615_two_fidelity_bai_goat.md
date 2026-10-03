@@ -1,7 +1,7 @@
 # Plan 615 Phase 2 — Two-Fidelity Certified BAI GOAT gate — **GOAT PASS** (re-arm after the Bench-906 negative's fixture root cause + the 916a baseline rebuild)
 
 **Bench:** `benches/bench_615_two_fidelity_bai_goat.rs` (`harness = false`, `required-features = ["two_fidelity_bai"]`; run: `cargo bench -p katgpt-core --features two_fidelity_bai --bench bench_615_two_fidelity_bai_goat`)
-**Plan:** [615_two_fidelity_bai.md](../.plans/615_two_fidelity_bai.md) · **Research:** 601 · **Paper:** arXiv:2606.01708 · **Issues:** 915 (closed — fixture root cause), 916 (a landed / b open)
+**Plan:** [615_two_fidelity_bai.md](../.plans/615_two_fidelity_bai.md) · **Research:** 601 · **Paper:** arXiv:2606.01708 · **Issues:** 915 (closed — fixture root cause), 916 (closed — (a) δ-correct baseline `3aa27c149`, (b) `lazy_discharge` resolver `ca9fb1617`, see the addendum; records in HISTORY.md)
 **Definitive run:** 2026-10-03 · **Box state:** M3 Max (16-core aarch64), macOS 26.6.2, AC power, release profile, sibling agent sessions active (all reported metrics are sample/cost counts — the unified cost model is load-independent by construction; G4 counts likewise). Determinism: the 2FFS rows reproduced byte-identically across four independently-built binaries spanning three code revisions today (the 915 fixture fix, the 916a baseline rebuild, the m_v table memoization) — same seeds, same code path, same numbers.
 
 ## Verdict
