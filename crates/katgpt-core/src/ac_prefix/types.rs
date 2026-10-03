@@ -520,7 +520,10 @@ pub fn keyed_gumbel_max_sample(logits: &[f32], seed: u64, position: u64) -> u32 
 /// prefix of the survivors whose cumulative survivor mass reaches `p`
 /// (inclusive of the crossing token; the first survivor is always kept, so
 /// the mask is never empty when any finite logit exists). `None` on either
-/// axis leaves it unfiltered.
+/// axis leaves it unfiltered. Documented divergences from the incumbent
+/// (both shared-function, so losslessness is unaffected): a `+inf` logit
+/// is DROPPED here while llama.cpp would rank it, and top-k ties break
+/// earliest-index-first here while llama.cpp's sort order is unspecified.
 ///
 /// NaN and ±inf logits are never eligible: they cannot rank, contribute no
 /// mass, and are never marked (an infinite logit is never a legitimate
