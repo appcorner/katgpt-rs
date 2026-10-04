@@ -4148,6 +4148,14 @@ name = "bench_616_minmax_partition_goat"
 harness = false
 required-features = ["minmax_partition"]
 
+# Plan 615 Phase 3+4 — user-facing example for the opt-in module. The
+# required-features row is load-bearing: without it `--all-targets` at
+# default features builds the example against a module compiled to
+# nothing (E0432, the repo's documented green-zero class).
+[[example]]
+name = "two_fidelity_bai_basic"
+required-features = ["two_fidelity_bai"]
+
 # Plan 615 Phase 2 — Two-Fidelity Certified BAI GOAT gate (T2.1–T2.5).
 # CANARY-first (impossible floors fire), SANITY T2.2b (negamax-UCT adapter
 # converges on zero-noise), G1 empirical PAC via one-sided Clopper–Pearson

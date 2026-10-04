@@ -3680,8 +3680,8 @@ pub mod calibration_staleness;
 
 /// Legal-token-set enumeration + the restricted-projection decision (Issue
 /// 841) — `CsrLegalSet` inverts "is this token valid?" into "which tokens
-/// are", and `ProjectionPlan` says how much of the vocabulary projection that
-/// justifies skipping. Opt-in (`legal_token_set`).
+///      are", and `ProjectionPlan` says how much of the vocabulary projection that
+///      justifies skipping. Opt-in (`legal_token_set`).
 #[cfg(feature = "legal_token_set")]
 pub mod legal_token_set;
 
