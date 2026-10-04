@@ -8,11 +8,15 @@
 //! conventions.
 //!
 //! G2 perf: `keyed_posterior_gumbel_noise` vs `keyed_gumbel_max_sample`
-//! at V ∈ {256, 32_000} — the issue's bar is SAME ORDER, ns-class. The
-//! posterior pays one LSE pass + one exp/log pair per loser on top of the
-//! sampler's single pass; the first-measurement bar asserts a ≤5× ratio
-//! (generous headroom over the ~2-3× op count, honest about a shared box)
-//! and prints both absolute figures.
+//! at V ∈ {256, 32_000} — the issue's bar is SAME ORDER, ns-class — as an
+//! interleaved median-of-ratios over the shared `ab_timing` harness
+//! (Issue 855's loud-zero defence: the harness PANICS when an arm
+//! measures all-zero, which is exactly how this bench's first draft lost
+//! its comparison arm to dead-code elimination). The posterior pays one
+//! LSE pass + one exp/log pair per loser on top of the sampler's single
+//! pass; the first-measurement bar asserts a ≤5× ratio (generous
+//! headroom over the ~2-3× op count, honest about a shared box) and
+//! prints both absolute figures with the per-round range.
 //!
 //! G4 alloc: counting-allocator canary over the hot path — ZERO
 //! allocations after warmup (the Issue-741 predicate).
@@ -24,7 +28,14 @@
 
 use katgpt_core::ac_prefix::{keyed_gumbel_max_sample, keyed_posterior_gumbel_noise};
 use std::hint::black_box;
-use std::time::Instant;
+
+// Issue 855: the load-invariant timing treatment + the loud-zero defence
+// (panics on an all-zero arm instead of letting a ratio be satisfied by a
+// loop the optimiser deleted — this bench's first draft lost exactly that
+// arm to `let _ =` dead-code elimination).
+#[path = "../../../tests/common/ab_timing.rs"]
+mod ab_timing;
+use ab_timing::ab_median_ratio;
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -77,20 +88,27 @@ fn main() {
         println!("[G1] identity + determinism + defensive: PASS (2_500 draws)");
     }
 
-    // ── G2: same-order latency vs the keyed sampler ─────────────────────
-    const ITERS: usize = 20_000;
+    // ── G2: same-order latency vs the keyed sampler (interleaved A/B) ──
     for &v in &[256usize, 32_000] {
         let logits = fixture_logits(v, 11);
         let mut out = vec![0f32; v];
+        let (rounds, iters, warmup) = if v < 1_000 {
+            (7usize, 100usize, 50usize)
+        } else {
+            (5, 5, 3)
+        };
 
-        // Warmup (branch predictors, page faults on the fixture).
-        for i in 0..200 {
-            keyed_posterior_gumbel_noise(&logits, (i * 7) as u32 % v as u32, 5, i as u64, &mut out);
-            let _ = keyed_gumbel_max_sample(&logits, 5, i as u64);
-        }
-
-        let t = Instant::now();
-        for i in 0..ITERS {
+        // Baseline (denominator) arm: the keyed sampler, sink-defended.
+        let mut sink = 0u32;
+        let a = |i: usize| {
+            sink = sink.wrapping_add(keyed_gumbel_max_sample(
+                black_box(&logits),
+                black_box(5),
+                black_box(i as u64),
+            ));
+        };
+        // Candidate (numerator) arm: the posterior sampler.
+        let b = |i: usize| {
             keyed_posterior_gumbel_noise(
                 black_box(&logits),
                 black_box((i * 7) as u32 % v as u32),
@@ -98,28 +116,22 @@ fn main() {
                 black_box(i as u64),
                 black_box(&mut out),
             );
-        }
-        let post_ns = t.elapsed().as_nanos() as f64 / ITERS as f64;
+        };
 
-        let t = Instant::now();
-        let mut sink = 0u32;
-        for i in 0..ITERS {
-            sink = sink.wrapping_add(keyed_gumbel_max_sample(
-                black_box(&logits),
-                black_box(5),
-                black_box(i as u64),
-            ));
-        }
+        let r = ab_median_ratio(rounds, iters, warmup, a, b);
         black_box(&sink);
-        let sample_ns = t.elapsed().as_nanos() as f64 / ITERS as f64;
-
-        let ratio = post_ns / sample_ns;
         println!(
-            "[G2] V={v}: posterior {post_ns:.0} ns vs keyed_max_sample {sample_ns:.0} ns (ratio {ratio:.2}x)"
+            "[G2] V={v}: posterior {:.0} ns vs keyed_max_sample {:.0} ns — b/a median {:.2}x (rounds {:.2}..{:.2})",
+            r.b_ns_per_iter(),
+            r.a_ns_per_iter(),
+            r.median,
+            r.min(),
+            r.max()
         );
         assert!(
-            ratio <= 5.0,
-            "posterior/sampler ratio {ratio:.2}x exceeds the 5x same-order bar"
+            r.median <= 5.0,
+            "posterior/sampler median ratio {:.2}x exceeds the 5x same-order bar",
+            r.median
         );
         // The absolute ns-class figure is printed, not asserted — it is a
         // shared-box regression ceiling, not a gate.

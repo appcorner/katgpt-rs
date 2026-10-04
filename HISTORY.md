@@ -28,7 +28,9 @@ ALL GATES PASS.
   structurally, so the ~50% discrimination arm is unconditional noise on
   both sides (0.5023 measured; the one-posterior-side variant reads
   0.2325, biased). **G2** same order as `keyed_gumbel_max_sample`:
-  2.27× / 2.10× at V=256 / 32k (≤5× bar). **G4** 0 allocs / 1k calls.
+  interleaved median-of-ratios over the shared `ab_timing` harness
+  (loud-zero defence) — 2.08× / 2.03× at V=256 / 32k (≤5× bar). **G4**
+  0 allocs / 1k calls.
 - Refactor rider, bit-pinned: the uniform construction under
   `keyed_gumbel_noise` extracted into `keyed_unit_interval` (the posterior
   consumes `u`, not its Gumbel image) — dedicated test replicates the
