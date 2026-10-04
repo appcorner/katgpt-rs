@@ -295,7 +295,7 @@ from = "score"; to = "average"
 [[edge]]
 from = "average"; to = "play"
 [[edge]]
-from = "play"; to = "fall"; back = true; label = "re-plan"
+from = "play"; to = "fall"; back = true; label = "next piece"
 
 [[walk]]
 title = "Look ahead — the falling piece"
