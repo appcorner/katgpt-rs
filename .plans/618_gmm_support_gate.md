@@ -7,7 +7,7 @@
 Ship the continuous-latent two-density support gate as a katgpt-core primitive by CONSUMING and EXTENDING shipped substrate (verdict round 1 — no parallel GMM type): extend the `RegionSubspaceField`-class Gaussian machinery with per-component variances + a logsumexp mixture density + EM refinement; seed EM from the shipped deterministic `fit_codebook_kmeans_into`; revive `JlProjectionMatrix` at E=256; add the pos/neg ratio gate, EMA smoother, and the offline excess-mass certification validator. Consumers: reflex fused-abstain density half (riir-reflex Issue 066), healer continuous ScopeModel sibling, riir-engine `LoRAHotSwap` gated dispatch (guide `riir-ai/.research/394`), vessel-packed per-phase artifacts.
 
 - [ ] T0 — substrate consume-or-extend map (REWRITTEN per verdict round 1): `RegionSubspaceField` (Plan 416 — centroids, log_pi, SHARED psi_inv, sigmoid membership gates, BLAKE3 commitment) · `fit_codebook_kmeans_into` (factorized_action — deterministic Lloyd + k-means++, no GD) · `JlProjectionMatrix` (shard_embedding — deprecated at m=8 for JL-bound breakage, Issue 139; SOUND at E≥256) · `data_probe/gaussianity.rs` (`sketched_gaussianity`, feature `gaussianity_probe`) · `GaussianMixtureSpace` (fixture-grade, NOT a gate). Re-grep at implementation time for anything newer.
-- [ ] T1 — mixture-density extension of the RegionSubspaceField class: per-region diagonal VARIANCES (psi per region, not shared), `loglik_mixture(&[f32; E]) -> f32` in log-space `logsumexp` form (the shipped `membership_gates` is per-region sigmoid, not a mixture density), zero-alloc eval path; artifact commitment REUSING `compute_field_commitment`'s format (extended fields appended in pinned order).
+- [ ] T1 — mixture-density extension of the RegionSubspaceField class: per-region diagonal VARIANCES (psi per region, not shared), `loglik_mixture(&[f32; E]) -> f32` in log-space `logsumexp` form (the shipped `membership_gates` is per-region sigmoid, not a mixture density), zero-alloc eval path; artifact commitment REUSING `compute_field_commitment`'s format (extended fields appended in pinned order). **Fit-space law (see Measured constraint): the mixture is fit/eval'd in the PROJECTED E-space, never raw D-space.**
 - [ ] T2 — EM refinement (`em_refine`): E-step responsibilities from the mixture density; M-step closed-form (means, per-region variances, weights); seeded FROM `fit_codebook_kmeans_into` (k-means++ init, the shipped no-GD constructor); fixed data order, iteration-capped; determinism pinned by BLAKE3 artifact hash (same input bytes → identical artifact).
 - [ ] T3 — `JlProjector`: revive `JlProjectionMatrix` at E=256 (de-gate the deprecation path or add a thin E≥256 constructor); seeded Rademacher; deterministic apply `project(&[f32; D], &mut [f32; E])`; **packed sign-bit storage** (verdict round 2: one bit per entry, applied with add/sub only — at batch-1 decode the projection is memory-bandwidth-bound and sign bits make its weight reads near-free; also the natural fit for the ternary/Bonsai direction); hash pinned; distortion probe test (JL bound sanity on a fixture set); the Issue-139 m=8 history carried in the doc comment so nobody re-shrinks it.
 - [ ] T4 — `SupportGate`: holds `pos` + `neg` mixture densities (neg shared per shape class); `log_ratio(&[f32; E]) -> f32`; `open(&x) -> bool` (hard) and `confidence(&x) -> f32` = `sigmoid(log_ratio / τ)` (sigmoid, never softmax); unfitted/empty = closed-always (the `CorpusDistanceGate` empty-corpus precedent); mid/scale knobs consumer-pinned with POC-scale defaults named as such.
@@ -30,3 +30,27 @@ Ship the continuous-latent two-density support gate as a katgpt-core primitive b
 
 - EM determinism across platforms (float summation order): pin the reduction order; artifact hash is the regression tripwire.
 - τ/κ defaults are POC-scale (the `contrastive_scope` precedent): consumers re-pin; the bench asserts sensitivity only, not universal optima.
+
+## Measured constraint (consumer-side evidence, 2026-10-04)
+
+**The GMM must be fit in the PROJECTED space — raw hashed-bag embedding space REJECTS
+Gaussianity universally.** Measured at the first consumer (riir-reflex Issue 066
+PRE-CHECK, reflex `bd18b86`, `examples/gaussianity_probe.rs` consuming
+`data_probe/gaussianity.rs::sketched_gaussianity` on the real seat-corpus embedding
+populations — whole-corpus + per-label, deterministic, two runs byte-identical):
+
+- raw 256-d hashed-bag space: **0/154 per-label pools accept** (median score 0.0000 on
+  every suite) — a diagonal-GMM fit there models a distribution the data provably is
+  not;
+- JL projection (Rademacher ±1/√k) at **k=64 rescues it: 253/254 pools accept,
+  median ≥ 0.95, k-stable across 64/32/16**;
+- whole-corpus pools stay REJECTED on many-label suites (massive 60 labels,
+  banking77 77) even projected — the label-mixture multimodality the per-label
+  components exist to model (this is T1/T2's component structure working as designed,
+  not a blocker).
+
+Consequences for this plan: T1/T2 fit ONLY post-T3-projection inputs (the `JlProjector`
+is a hard prerequisite of any real-data fit, not an optional accelerator); T6/T7
+validators and T9 benches that use real-corpus-like fixtures must project first or
+their Φ references are meaningless; T12 consumer handoffs carry the same law (a
+consumer fitting in raw space will measure a gate that is wrong by construction).
