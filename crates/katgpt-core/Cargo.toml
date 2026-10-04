@@ -956,6 +956,34 @@ sigmoid_calibration = []
 # is the Proposal 014 Phase-1 engine's abstain arm (owner-gated).
 distance_abstain = []
 
+# gmm_support (Plan 618 / Research 604, 2026-10-05): the density-ratio
+# support gate — the continuous-latent two-density member of the gate
+# family (arXiv:2610.02126 "Local Support Learning" extraction).
+# DiagGmm (the mixture-density extension of the RegionSubspaceField class:
+# per-component diagonal variances + a true logsumexp mixture density +
+# BLAKE3 commitment reusing the compute_field_commitment convention) ·
+# fit_diag_gmm (EM refinement seeded from the shipped deterministic
+# fit_codebook_kmeans_into — implies factorized_action) · JlProjector (the
+# JL projection REVIVED at E ≥ 32 with packed sign-bit storage — the
+# Issue-139 m=8 history carried, compile-time shape guard) · SupportGate
+# (pos/neg log-ratio, sigmoid-never-softmax confidence bridge,
+# unfitted = closed-always) · GateSmoother (per-stream EMA) · the T6/T7
+# certification instruments (Φ_neg-weighted excess mass + deficit + the
+# leak-by-construction linear-discriminator canary, exit-2 class) ·
+# deterministic fixtures (CLT-12 libm-free sampler — bit-identical
+# cross-platform). FIT-SPACE LAW (measured at the first consumer,
+# riir-reflex Issue 066 PRE-CHECK): fit/eval in the JL-PROJECTED space
+# (E ≈ 32–64), NEVER raw D-space — raw hashed-bag space rejects
+# Gaussianity universally (0/154 label pools). Zero-alloc eval path;
+# offline fit/certify paths allocate (documented). GOAT gate:
+# bench_gmm_support_gate (G1 correctness/determinism, G2 per-request +
+# layer-scope latency bars with the projection COUNTED, G4 alloc canary,
+# G5 the two-sided leak canary + the fixture-scoped bound). OPT-IN per
+# the no-default-consumer rule — first consumer riir-reflex Issue 066
+# (the fused-abstain density half); promotion rides that consumer's
+# GOAT.
+gmm_support = ["factorized_action"]
+
 # exact_mass_admit (Issue 879 / Research 584, 2026-09-24): the MAttr
 # (arXiv:2609.25518 "Matryoshka attribution") budget-primitive family — two
 # modules, one feature. (1) `exact_mass_admit`: the calibrated-mass
@@ -3960,6 +3988,16 @@ required-features = ["sigmoid_calibration", "action_bridge"]
 name = "bench_845_distance_abstain_goat"
 harness = false
 required-features = ["distance_abstain"]
+
+# Plan 618 — gmm_support GOAT gate (G1 determinism, G2 request+layer
+# latency with the projection counted, G4 alloc canary, G5 the two-sided
+# leak canary + the fixture-scoped bound).
+# cargo bench -p katgpt-core --features gmm_support
+# --no-default-features --bench bench_gmm_support_gate -- --nocapture
+[[bench]]
+name = "bench_gmm_support_gate"
+harness = false
+required-features = ["gmm_support"]
 
 # Issue 800 Arm A — SIMD bf16⇄f32 batch conversion GOAT gate (G1 known-answer
 # vs `half` RNE + NaN/Inf/subnormal survival, G2 ≥4× scalar at 8 lanes,
