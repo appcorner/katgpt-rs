@@ -2,7 +2,7 @@
 
 > **Source:** [Finetuning with Sampling: SFT Learns Better Than You Think](https://arxiv.org/abs/2610.02140) — Aayush Karan, Sitan Chen, Yilun Du (Harvard), arXiv:2610.02140, submitted 2026-10-01, NeurIPS 2026. [Blog](https://aakaran.github.io/finetuning_with_sampling/) · [Code](https://github.com/aakaran/finetuning-with-sampling) `@ 6d3e9f0bfaa98dcca534247dd35dc1b33dd8c428` (shallow clone, quotes verified at pin; clone deleted after distill)
 > **Date:** 2026-10-03
-> **Status:** Done — **Gain** verdict. Training track: GOAT → [riir-train Plan 438](../../riir-train/.plans/438_projection_sampling_sft_data_shaping.md). Modelless track: fusion ideas → [riir-reflex Issue 064](../../riir-reflex/.issues/064_projection_ascent_corpus_synthesis.md) + audited discards below. No Super-GOAT.
+> **Status:** Done — **Gain** verdict. Training track: GOAT → [riir-train Plan 438](../../riir-train/.plans/438_projection_sampling_sft_data_shaping.md). Modelless track: fusion ideas → `riir-reflex Issue 064` + audited discards below. No Super-GOAT.
 > **Related Research:** 346 (IRED — energy-decrease acceptance, "Metropolis-without-the-reject-step" analogy; same author Yilun Du), 524 (GFlowNet — Metropolis/best-of-N as the modelless substitute, "generic MCMC" discard precedent), 558 (SLT/WBIC — MCMC-as-instrument precedent)
 > **Related Plans:** riir-train 438 (projection-sampling SFT data shaping — filed this session), riir-train 426 T5 (the reflex corpus-synthesis lane — the closest structural cousin's design doc), riir-train 610 (the 4090 scoring queue issue)
 > **Classification:** Public

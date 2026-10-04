@@ -5395,7 +5395,7 @@ closed-form O(K·E) eval, an EMA scalar, an offline-certifiable excess bound.
   exist to model
 
 **GOAT G1/G2a/G2b/G4/G5 ALL PASS**
-([Bench 908](.benchmarks/908_gmm_support_goat.md)) — G2a request posture
+([Bench 908](../../.benchmarks/908_gmm_support_goat.md)) — G2a request posture
 8529 ns = 0.67× the decision-pass proxy; G2b layer posture ≤ 12% bar with
 the FLOP arithmetic ≈ 6.0% of a Qwen2.5-1.5B-shaped layer; G4 zero allocs;
 G5 the two-sided leak canary + the fixture-scoped bound. Stays opt-in per
