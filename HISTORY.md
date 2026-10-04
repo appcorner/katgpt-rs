@@ -1,3 +1,48 @@
+## Issue 918 (2026-10-05) — posterior (truncated-Gumbel) inverse sampler, max-first: CLOSED (file removed per noise-reduction)
+
+Execution-class POC against a cited lineage (the posterior construction
+is Zhang et al. 2026 via arXiv:2610.00497 App E; the trick is Gumbel 1954;
+the OT identification implicit in Galichon 2016 — zero novelty claims,
+spec pre-adjudicated at verdict round 1). [Bench 918](.benchmarks/918_posterior_gumbel_goat.md)
+ALL GATES PASS.
+
+- `keyed_posterior_gumbel_noise` in the DEFAULT-ON `ac_prefix` feature
+  (a Plan-614 substrate addition, no new feature): given logits and a
+  REALIZED pick, samples noise from the exact posterior
+  `p(ξ | argmax(ℓ+ξ) = y)` — `M ~ Gumbel(LSE(ℓ))` at a reserved keyed
+  slot (winner-independent, so same-key draws with different winners
+  SHARE their max — the coupling the residual-ordering property holds
+  on), winner pinned `ξ*_y = M − ℓ_y`, losers truncated above at
+  `M − ℓ_k` via the inverse CDF over the SAME keyed uniform stream the
+  prior noise maps (common random numbers). O(V), zero-alloc, defensive
+  no-write conventions, deterministic f32 tie-guard (`next_down`,
+  direction-correct for negative values).
+- **G1** argmax identity 100% (2k×4 + bench 500×5 draws) + bit-determinism
+  + red arm (foreign logits break the identity). **G1b** joint law: winner
+  AND loser marginals match the rejection-filtered prior (KS 0.0078 /
+  0.0126 / 0.0135 ≪ 0.05); the BIASED construction (free losers, winner
+  pinned above their max) FAILS the loser checks (0.1158 / 0.1753) — the
+  gate catches exactly the coupling the issue forbids. **Residual
+  ordering** (Thm 1): 0 violations over 10⁴ coupled pairs; measured
+  SHARPER than spec — ANY two valid posterior draws satisfy it
+  structurally, so the ~50% discrimination arm is unconditional noise on
+  both sides (0.5023 measured; the one-posterior-side variant reads
+  0.2325, biased). **G2** same order as `keyed_gumbel_max_sample`:
+  2.27× / 2.10× at V=256 / 32k (≤5× bar). **G4** 0 allocs / 1k calls.
+- Refactor rider, bit-pinned: the uniform construction under
+  `keyed_gumbel_noise` extracted into `keyed_unit_interval` (the posterior
+  consumes `u`, not its Gumbel image) — dedicated test replicates the
+  Plan-614 inline arithmetic verbatim and asserts equality over an
+  80-key grid; the categorical pin (100k draws) still passes.
+- En-route defect the gates caught: the max's SIGN (`M = LSE + g`, not
+  `LSE − g`) — the argmax identity still passed on the flipped build (it
+  is structural) while the winner-marginal KS read 0.293; the joint gate
+  caught what the identity gate cannot.
+- Consumer (honest, carried in the fn docs): the GSF training coupling
+  (riir-train Plan 437 Phase 1b/4b) — NOT a replay tool for our own keyed
+  sampler (a recorded seed already replays exactly; the issue's
+  retraction clause). Lib suite 2087/0 at default features (+5 tests).
+
 ## Issue 916 (2026-10-03 → closed 2026-10-03) — two_fidelity_bai G2 cost debt: CLOSED — δ-correct baseline (a) + lazy-discharge resolver (b) (file removed per noise-reduction)
 
 Filed from Issue 915's re-arm: G2(a) vs BAI-MCTS failed on cost. Two causes,

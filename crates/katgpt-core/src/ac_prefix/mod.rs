@@ -77,10 +77,12 @@ pub use forward::ForwardForAcPrefix;
 pub use types::{AcPrefix, AcPrefixMask};
 // The keyed-Gumbel verify-sampling pair (position-keyed noise — the
 // order-invariant shared stream drafter proposals and target verify
-// samples consume; Plan-614 substrate row).
+// samples consume; Plan-614 substrate row) + the posterior inverse
+// sampler (Issue 918: reconstruct consistent noise FROM a realized pick,
+// max-first truncated construction).
 pub use types::{
     keyed_gumbel_max_sample, keyed_gumbel_max_sample_masked, keyed_gumbel_max_sample_truncated,
-    keyed_gumbel_noise, truncation_keep_mask,
+    keyed_gumbel_noise, keyed_posterior_gumbel_noise, truncation_keep_mask,
 };
 
 pub(crate) use types::gumbel_max_sample;

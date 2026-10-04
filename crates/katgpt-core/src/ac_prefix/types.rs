@@ -460,6 +460,18 @@ pub(crate) fn gumbel_max_sample(logits: &[f32], rng: &mut fastrand::Rng) -> u32 
 /// near-tie inside one ulp of noise.
 #[inline]
 pub fn keyed_gumbel_noise(seed: u64, position: u64, token_id: u32) -> f32 {
+    let u = keyed_unit_interval(seed, position, token_id);
+    (-(-u.ln()).ln()) as f32
+}
+
+/// The open-interval uniform underneath [`keyed_gumbel_noise`], exposed as
+/// its own step so transforms that need `u` itself (the posterior sampler's
+/// truncation) consume the SAME keyed stream instead of a parallel one.
+/// Bit-identical to the arithmetic that lived inline in
+/// `keyed_gumbel_noise` since Plan 614 (extraction only — the G1 pins on
+/// the verify stream's sampled tokens are the regression tripwire).
+#[inline]
+fn keyed_unit_interval(seed: u64, position: u64, token_id: u32) -> f64 {
     #[inline(always)]
     fn fin(z: u64) -> u64 {
         // SplitMix64 finalizer (Steele et al.) — full avalanche.
@@ -475,8 +487,7 @@ pub fn keyed_gumbel_noise(seed: u64, position: u64, token_id: u32) -> f32 {
             ^ (token_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9),
     );
     let inv = 1.0f64 / (1u64 << 53) as f64;
-    let u = ((z >> 11) as f64) * inv + inv * 0.5;
-    (-(-u.ln()).ln()) as f32
+    ((z >> 11) as f64) * inv + inv * 0.5
 }
 
 /// Keyed Gumbel-max sample: `argmax_i (logits[i] + g(seed, position, i))`
@@ -644,6 +655,115 @@ pub fn keyed_gumbel_max_sample_truncated(
 ) -> u32 {
     let keep = truncation_keep_mask(logits, top_k, top_p);
     keyed_gumbel_max_sample_masked(logits, seed, position, temperature, &keep)
+}
+
+/// The keyed uniform slot reserved for the posterior sampler's max draw.
+/// Vocab indices occupy `0..len`; `u32::MAX` is unreachable for any real
+/// vocabulary and keeps the max's randomness disjoint from every loser's.
+const POSTERIOR_MAX_SLOT: u32 = u32::MAX;
+
+/// Keyed posterior (truncated-Gumbel) inverse sampler — the MAX-FIRST
+/// construction (Issue 918; the posterior construction is Zhang et al. 2026,
+/// via arXiv:2610.00497 App E; the Gumbel trick is Gumbel 1954).
+///
+/// Given logits `ℓ` and a REALIZED pick `y` (e.g. a teacher-forced token
+/// whose sampling seed is unknown), writes into `out` a noise vector `ξ*`
+/// sampled from the exact posterior `p(ξ | argmax(ℓ + ξ) = y)`:
+///
+/// - `M ~ Gumbel(logsumexp(ℓ))` — under the Gumbel-max representation the
+///   maximum score is Gumbel with that location and is INDEPENDENT of the
+///   winner index, so `M`'s key (`(seed, position)`, slot
+///   [`POSTERIOR_MAX_SLOT`]) does not involve `y`: two draws at the same key
+///   with different winners share their max, which is exactly the coupling
+///   the residual-ordering property holds on.
+/// - `ξ*_y = M − ℓ_y` — the winner's noise is PINNED so `ℓ_y + ξ*_y = M`.
+/// - each loser `k ≠ y`: `ξ*_k ~ Gumbel(0)` truncated ABOVE at `M − ℓ_k`
+///   via the inverse CDF `ξ*_k = −log(−log(u_k · F(M − ℓ_k)))`,
+///   `F(t) = exp(−exp(−t))` — coordinates conditionally independent given
+///   the max. `u_k` is the SAME keyed uniform [`keyed_gumbel_noise`] maps
+///   through the prior transform at that key (common random numbers:
+///   prior and posterior at one key are one stream, two transforms).
+///
+/// This is NOT "draw losers freely, then pin the winner above their max" —
+/// that reproduces the pick but leaves the loser marginals UNTRUNCATED, a
+/// biased coupling that would corrupt a straightness consumer (the G1b
+/// gate's red arm pins the difference).
+///
+/// Deterministic float tie-guard: scores are compared in f32
+/// (`argmax(ℓ + ξ*)` with the substrate's strict-`>` first-index
+/// convention); a loser that rounds up onto the winner's score is nudged
+/// one ulp down until strictly below. The nudge is sub-precision — it fires
+/// only on exact float ties and is invisible to the distribution gates.
+///
+/// Honest consumer note (the issue's retraction clause): this exists for
+/// consumers that must RECONSTRUCT consistent noise from an outcome
+/// (the GSF training coupling, riir-train Plan 437). It is NOT a replay
+/// tool for our own keyed sampler — `keyed_gumbel_noise` is a pure
+/// function of its key, so a recorded seed already replays exactly, and a
+/// posterior sample is *a* consistent noise, never *the* noise used.
+///
+/// Defensive conventions (the substrate's): empty `logits`, `winner >=
+/// len`, or `out.len() != logits.len()` write nothing and return — a
+/// caller bug never becomes a silent full-vocab fallback. Assumes finite
+/// logits (the verify-loop contract); the LSE is max-shifted, so
+/// moderate magnitudes are exact to within f32 rounding.
+/// Zero-allocation: writes only into `out`.
+pub fn keyed_posterior_gumbel_noise(
+    logits: &[f32],
+    winner: u32,
+    seed: u64,
+    position: u64,
+    out: &mut [f32],
+) {
+    let n = logits.len();
+    if n == 0 || out.len() != n || winner as usize >= n {
+        return;
+    }
+    // LSE(ℓ), max-shifted (f32 — the precision the consumer's argmax runs
+    // at; deterministic on-platform per the keyed_noise platform note).
+    let mut m = f32::NEG_INFINITY;
+    for &l in logits {
+        if l > m {
+            m = l;
+        }
+    }
+    let mut sum = 0.0f32;
+    for &l in logits {
+        sum += (l - m).exp();
+    }
+    let lse = m + sum.ln();
+    // M ~ Gumbel(lse): keyed uniform at the reserved slot, winner-independent.
+    // Gumbel(μ) = μ − ln(−ln(u)) = μ + g with g ~ Gumbel(0), so the max
+    // ADDS the standard noise (the sign the CDF derivation pins:
+    // P(max ≤ x) = exp(−exp(−(x − lse)))).
+    let u_max = keyed_unit_interval(seed, position, POSTERIOR_MAX_SLOT);
+    let gumbel_zero_max = (-(-u_max.ln()).ln()) as f32;
+    let big_m = lse + gumbel_zero_max;
+    let w = winner as usize;
+    out[w] = big_m - logits[w];
+    let score_w = logits[w] + out[w];
+    for (k, &l) in logits.iter().enumerate() {
+        if k == w {
+            continue;
+        }
+        // Gumbel(0) truncated above at t = M − ℓ_k, inverse-CDF form.
+        let t = (big_m - l) as f64;
+        let u = keyed_unit_interval(seed, position, k as u32);
+        let w_trunc = u * (-(-t).exp()).exp();
+        let mut xi = (-(-w_trunc.ln()).ln()) as f32;
+        // Deterministic tie-guard: the loser's f32 score must sit strictly
+        // below the winner's. One ulp (`next_down` — the bit-pattern
+        // decrement is direction-correct for negative values too) per pass;
+        // bounded in the sane-logit regime (a tie needs |Δ| below one ulp
+        // of the score magnitude). NaN scores compare false and exit at
+        // once (the defensive posture for non-finite caller input).
+        let mut score = l + xi;
+        while score >= score_w {
+            xi = xi.next_down();
+            score = l + xi;
+        }
+        out[k] = xi;
+    }
 }
 
 /// Bit-packed attention mask for the augmented sequence.
@@ -1228,5 +1348,334 @@ mod tests {
                 hits[k]
             );
         }
+    }
+
+    #[test]
+    fn keyed_unit_interval_extraction_is_bit_identical_to_the_plan614_arithmetic() {
+        // Issue 918's refactor extracted the uniform construction from
+        // `keyed_gumbel_noise` into `keyed_unit_interval`. The extraction
+        // must be BIT-identical: the verify loop (Plan 614) consumes the
+        // keyed stream, and downstream pins ride those exact bits. This
+        // replicates the pre-extraction inline body verbatim and compares
+        // over a key grid.
+        fn old_inline_gumbel(seed: u64, position: u64, token_id: u32) -> f32 {
+            #[inline(always)]
+            fn fin(z: u64) -> u64 {
+                let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            }
+            let z = fin(
+                fin(seed ^ position.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                    ^ (token_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9),
+            );
+            let inv = 1.0f64 / (1u64 << 53) as f64;
+            let u = ((z >> 11) as f64) * inv + inv * 0.5;
+            (-(-u.ln()).ln()) as f32
+        }
+        for seed in [0u64, 1, 42, 0xDEAD_BEEF, u64::MAX] {
+            for position in [0u64, 7, 1_000_003, u64::MAX / 3] {
+                for token in [0u32, 1, 31999, u32::MAX] {
+                    assert_eq!(
+                        keyed_gumbel_noise(seed, position, token),
+                        old_inline_gumbel(seed, position, token),
+                        "({seed}, {position}, {token})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two-sample KS statistic (sup |ECDF_a − ECDF_b|), total_cmp-sorted.
+    fn ks_two_sample(a: &mut [f32], b: &mut [f32]) -> f64 {
+        a.sort_by(|x, y| x.total_cmp(y));
+        b.sort_by(|x, y| x.total_cmp(y));
+        let mut i = 0usize;
+        let mut j = 0usize;
+        let mut d = 0.0f64;
+        while i < a.len() && j < b.len() {
+            if a[i] <= b[j] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+            let fa = i as f64 / a.len() as f64;
+            let fb = j as f64 / b.len() as f64;
+            d = d.max((fa - fb).abs());
+        }
+        d
+    }
+
+    fn mean_std(xs: &[f32]) -> (f64, f64) {
+        let n = xs.len() as f64;
+        let mean = xs.iter().map(|&x| x as f64).sum::<f64>() / n;
+        let var = xs.iter().map(|&x| {
+            let d = x as f64 - mean;
+            d * d
+        }).sum::<f64>() / (n - 1.0);
+        (mean, var.sqrt())
+    }
+
+    #[test]
+    fn posterior_reproduces_the_pick_exactly() {
+        // G1: argmax(ℓ + ξ*) == winner on 100% of fixture picks, and the
+        // draw is a pure function of its key. Red arm: noise drawn for
+        // logits A must break the identity against a different row B —
+        // the identity belongs to the CONSTRUCTION, not to any noise.
+        let ln = |p: f64| (p as f32).ln();
+        let logits = [ln(0.40), ln(0.30), ln(0.20), ln(0.10)];
+        let shifted = [ln(0.10), ln(0.20), ln(0.35), ln(0.35)];
+        let mut out = [0f32; 4];
+        let mut other = [0f32; 4];
+        let mut wrong = 0u32;
+        for pos in 0..2_000u64 {
+            for &winner in &[0u32, 1, 2, 3] {
+                keyed_posterior_gumbel_noise(&logits, winner, 0x918, pos, &mut out);
+                keyed_posterior_gumbel_noise(&logits, winner, 0x918, pos, &mut other);
+                assert_eq!(out, other, "keyed draw must be bit-identical");
+                let mut best = 0usize;
+                let mut best_s = f32::NEG_INFINITY;
+                for (k, (&l, &x)) in logits.iter().zip(out.iter()).enumerate() {
+                    let s = l + x;
+                    if s > best_s {
+                        best_s = s;
+                        best = k;
+                    }
+                }
+                assert_eq!(best as u32, winner, "pos {pos} winner {winner}");
+                let mut b2 = 0usize;
+                let mut s2 = f32::NEG_INFINITY;
+                for (k, (&l, &x)) in shifted.iter().zip(out.iter()).enumerate() {
+                    let s = l + x;
+                    if s > s2 {
+                        s2 = s;
+                        b2 = k;
+                    }
+                }
+                if b2 as u32 != winner {
+                    wrong += 1;
+                }
+            }
+        }
+        assert!(
+            wrong > 0,
+            "red arm never fired — the identity held for foreign logits"
+        );
+    }
+
+    #[test]
+    fn posterior_marginals_match_the_filtered_prior() {
+        // G1b (joint-distribution gate): the sampler's winner AND loser
+        // coordinate marginals must match the rejection-filtered prior
+        // (draw ξ ~ prior, keep argmax == y). KS + moment checks on both
+        // groups; the red arm is the BIASED construction (free losers,
+        // winner pinned above their max) which must FAIL the loser checks —
+        // the gate has to be able to catch the coupling the issue forbids.
+        let ln = |p: f64| (p as f32).ln();
+        const V: usize = 5;
+        const W: usize = 1; // mid-probability winner: p ≈ 0.28
+        const N: usize = 6_000;
+        let logits = [ln(0.32), ln(0.28), ln(0.20), ln(0.12), ln(0.08)];
+
+        // Reference: rejection-filter the prior.
+        let mut ref_winner = Vec::with_capacity(N);
+        let mut ref_losers = Vec::with_capacity(N * (V - 1));
+        let mut ref_top_loser = Vec::with_capacity(N);
+        let mut pos = 0u64;
+        while ref_winner.len() < N {
+            pos += 1;
+            let mut best = 0usize;
+            let mut best_s = f32::NEG_INFINITY;
+            let mut draw = [0f32; V];
+            for (k, &l) in logits.iter().enumerate() {
+                let g = keyed_gumbel_noise(0x61B, pos, k as u32);
+                draw[k] = g;
+                let s = l + g;
+                if s > best_s {
+                    best_s = s;
+                    best = k;
+                }
+            }
+            if best == W {
+                ref_winner.push(draw[W]);
+                for (k, &g) in draw.iter().enumerate() {
+                    if k != W {
+                        ref_losers.push(g);
+                        if k == 0 {
+                            ref_top_loser.push(g);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sampler draws: same counts, distinct keys.
+        let mut smp_winner = Vec::with_capacity(N);
+        let mut smp_losers = Vec::with_capacity(N * (V - 1));
+        let mut smp_top_loser = Vec::with_capacity(N);
+        let mut out = [0f32; V];
+        for i in 0..N {
+            keyed_posterior_gumbel_noise(&logits, W as u32, 0x61B, 1_000_000 + i as u64, &mut out);
+            smp_winner.push(out[W]);
+            for (k, &x) in out.iter().enumerate() {
+                if k != W {
+                    smp_losers.push(x);
+                    if k == 0 {
+                        smp_top_loser.push(x);
+                    }
+                }
+            }
+        }
+
+        // Red arm: the BIASED construction — free losers, winner pinned
+        // above their max afterwards. Loser marginals lack the truncation
+        // tilt, which the loser checks below must detect.
+        let mut bias_losers = Vec::with_capacity(N * (V - 1));
+        let mut bias_top_loser = Vec::with_capacity(N);
+        for i in 0..N {
+            let pos = 2_000_000 + i as u64;
+            for k in 0..V {
+                if k == W {
+                    continue;
+                }
+                let g = keyed_gumbel_noise(0x61B, pos, k as u32);
+                bias_losers.push(g);
+                if k == 0 {
+                    bias_top_loser.push(g);
+                }
+            }
+        }
+
+        // KS bounds: n=6k vs 6k per group → α=0.001 critical ≈ 0.036;
+        // the pass bound 0.05 keeps ≥1.4× margin over the exact sampler
+        // while sitting far below the biased arm's truncation gap.
+        const KS_PASS: f64 = 0.05;
+        let ks_w = ks_two_sample(&mut smp_winner, &mut ref_winner);
+        assert!(ks_w < KS_PASS, "winner KS {ks_w}");
+        let ks_l = ks_two_sample(&mut smp_losers, &mut ref_losers);
+        assert!(ks_l < KS_PASS, "loser KS {ks_l}");
+        let ks_tl = ks_two_sample(&mut smp_top_loser, &mut ref_top_loser);
+        assert!(ks_tl < KS_PASS, "top-loser KS {ks_tl}");
+        eprintln!(
+            "[G1b] KS winner {ks_w:.4} · pooled losers {ks_l:.4} · top-loser {ks_tl:.4}"
+        );
+
+        // Moment checks (means within 4 joint SEs; the filtered prior and
+        // the posterior share one law, so any real drift is a bug).
+        let (mw, sw) = mean_std(&smp_winner);
+        let (rw, tw) = mean_std(&ref_winner);
+        let se = (sw * sw / N as f64 + tw * tw / N as f64).sqrt();
+        assert!((mw - rw).abs() < 4.0 * se, "winner mean {mw} vs {rw}");
+        let (ml, sl) = mean_std(&smp_losers);
+        let (rl, tl) = mean_std(&ref_losers);
+        let nl = smp_losers.len() as f64;
+        let se = (sl * sl / nl + tl * tl / nl).sqrt();
+        assert!((ml - rl).abs() < 4.0 * se, "loser mean {ml} vs {rl}");
+
+        // The red arm must FAIL the loser checks (winner coordinate is
+        // correct in both constructions — the discrimination lives in the
+        // losers' truncation).
+        let ks_bl = ks_two_sample(&mut bias_losers, &mut ref_losers);
+        let ks_btl = ks_two_sample(&mut bias_top_loser, &mut ref_top_loser);
+        eprintln!("[G1b-red] biased pooled {ks_bl:.4} · biased top-loser {ks_btl:.4}");
+        assert!(
+            ks_bl >= KS_PASS || ks_btl >= KS_PASS,
+            "biased construction escaped: pooled {ks_bl}, top-loser {ks_btl}"
+        );
+    }
+
+    #[test]
+    fn posterior_residual_ordering_property() {
+        // Theorem-1 mechanism (arXiv:2610.00497 App A.1): two posterior
+        // draws from the SAME logits and key (hence a SHARED max M) with
+        // distinct winners k1≠k2 satisfy ξ¹_k1 − ξ²_k1 > ξ¹_k2 − ξ²_k2
+        // DETERMINISTICALLY — the coupled pair's residuals order by winner.
+        // A literal path-intersection test cannot discriminate (measure-
+        // zero in ℝ^V); the inequality is the falsifiable form.
+        //
+        // Sharper than the issue's spec, measured on the first run: ANY two
+        // valid posterior draws satisfy the inequality — even at INDEPENDENT
+        // keys — because pinned-winner-vs-truncated-loser alone implies it
+        // (d1 > M¹−M² > d2). The discrimination arm therefore contrasts the
+        // posterior construction against UNCONDITIONAL noise (iid Gumbel
+        // coordinates), where the two differences are exchangeable and the
+        // violation fraction is ~0.5 — the red arm that actually fires.
+        let ln = |p: f64| (p as f32).ln();
+        let logits = [ln(0.3), ln(0.3), ln(0.2), ln(0.2)];
+        const K1: usize = 0;
+        const K2: usize = 3;
+        const PAIRS: u64 = 10_000;
+        let mut a = [0f32; 4];
+        let mut b = [0f32; 4];
+        let mut coupled_violations = 0u32;
+        let mut indep_posterior_violations = 0u32;
+        let mut iid_noise_violations = 0u32;
+        for pos in 0..PAIRS {
+            // Coupled: shared key → shared max M.
+            keyed_posterior_gumbel_noise(&logits, K1 as u32, 0x7EED, pos, &mut a);
+            keyed_posterior_gumbel_noise(&logits, K2 as u32, 0x7EED, pos, &mut b);
+            let (d1, d2) = (a[K1] - b[K1], a[K2] - b[K2]);
+            if !matches!(d1.partial_cmp(&d2), Some(std::cmp::Ordering::Greater)) {
+                coupled_violations += 1;
+            }
+            // Independent keys: still two valid posteriors — the ordering
+            // is structural (recorded; NOT the discrimination arm).
+            keyed_posterior_gumbel_noise(&logits, K2 as u32, 0x7EED, 5_000_000 + pos, &mut b);
+            let (d1, d2) = (a[K1] - b[K1], a[K2] - b[K2]);
+            if !matches!(d1.partial_cmp(&d2), Some(std::cmp::Ordering::Greater)) {
+                indep_posterior_violations += 1;
+            }
+            // Unconditional control: BOTH sides iid Gumbel coordinates
+            // (the prior noise, no posterior structure anywhere) — the four
+            // coordinates are exchangeable, so the two differences are
+            // iid and the violation fraction is ~0.5 (the measured
+            // one-posterior-side variant reads ~0.23: the winner-pinning
+            // asymmetry biases holds — not a clean control).
+            for (k, slot) in a.iter_mut().enumerate() {
+                *slot = keyed_gumbel_noise(0x7EED, 8_000_000 + pos, k as u32);
+            }
+            for (k, slot) in b.iter_mut().enumerate() {
+                *slot = keyed_gumbel_noise(0x7EED, 9_000_000 + pos, k as u32);
+            }
+            let (d1, d2) = (a[K1] - b[K1], a[K2] - b[K2]);
+            if !matches!(d1.partial_cmp(&d2), Some(std::cmp::Ordering::Greater)) {
+                iid_noise_violations += 1;
+            }
+        }
+        assert_eq!(
+            coupled_violations, 0,
+            "coupled pairs must satisfy the residual ordering deterministically"
+        );
+        assert_eq!(
+            indep_posterior_violations, 0,
+            "independent-key posteriors satisfy it too (structural) — if this reds, the winner-pinning/truncation invariants broke"
+        );
+        let frac = iid_noise_violations as f64 / PAIRS as f64;
+        eprintln!(
+            "[residual] iid-control violation fraction {frac:.4} (coupled 0, indep-posterior {indep_posterior_violations})"
+        );
+        assert!(
+            (0.30..=0.70).contains(&frac),
+            "unconditional-noise control violation fraction {frac} not ~0.5"
+        );
+    }
+
+    #[test]
+    fn posterior_defensive_conventions() {
+        let logits = [0.1f32, 0.2, 0.3];
+        let mut out = [f32::NAN; 3];
+        // winner out of range → no write.
+        keyed_posterior_gumbel_noise(&logits, 3, 1, 1, &mut out);
+        assert!(out.iter().all(|x| x.is_nan()));
+        // empty logits → no write, no panic.
+        keyed_posterior_gumbel_noise(&[], 0, 1, 1, &mut out);
+        assert!(out.iter().all(|x| x.is_nan()));
+        // V=1: the posterior degenerates to the winner's own Gumbel(0)
+        // noise, drawn at the reserved max slot — pin the construction.
+        let mut one = [0f32; 1];
+        keyed_posterior_gumbel_noise(&[2.0f32], 0, 5, 9, &mut one);
+        let u_max = keyed_unit_interval(5, 9, u32::MAX);
+        let expect = (-(-u_max.ln()).ln()) as f32;
+        assert!((one[0] - expect).abs() < 1e-4, "{} vs {}", one[0], expect);
     }
 }

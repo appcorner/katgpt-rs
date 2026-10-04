@@ -3999,6 +3999,17 @@ name = "bench_gmm_support_gate"
 harness = false
 required-features = ["gmm_support"]
 
+# Issue 918 — posterior (truncated-Gumbel) inverse sampler GOAT gate
+# (G1 identity/determinism/defensive live rerun, G2 same-order latency vs
+# keyed_gumbel_max_sample at V ∈ {256, 32k}, G4 alloc canary). Rides the
+# DEFAULT-ON ac_prefix feature (an addition to the Plan-614 substrate,
+# not a new feature).
+# cargo bench -p katgpt-core --bench bench_posterior_gumbel -- --nocapture
+[[bench]]
+name = "bench_posterior_gumbel"
+harness = false
+required-features = ["ac_prefix"]
+
 # Issue 800 Arm A — SIMD bf16⇄f32 batch conversion GOAT gate (G1 known-answer
 # vs `half` RNE + NaN/Inf/subnormal survival, G2 ≥4× scalar at 8 lanes,
 # G4 zero-alloc into_buf).

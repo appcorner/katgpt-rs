@@ -1394,11 +1394,12 @@ pub use ac_prefix::{AcPrefix, AcPrefixMask};
 // The keyed-Gumbel verify-sampling pair (position-keyed noise — the
 // order-invariant shared stream drafter proposals and target verify
 // samples consume; Plan-614 substrate row) plus the truncated-sampling
-// triple the Phase-2 target side composes (mask → scale → keyed argmax).
+// triple the Phase-2 target side composes (mask → scale → keyed argmax)
+// and the posterior inverse sampler (Issue 918).
 #[cfg(feature = "ac_prefix")]
 pub use ac_prefix::{
     keyed_gumbel_max_sample, keyed_gumbel_max_sample_masked, keyed_gumbel_max_sample_truncated,
-    keyed_gumbel_noise, truncation_keep_mask,
+    keyed_gumbel_noise, keyed_posterior_gumbel_noise, truncation_keep_mask,
 };
 
 #[cfg(feature = "flow_field_nav")]
