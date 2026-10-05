@@ -1,3 +1,10 @@
+## Issue 906 (2026-10-05) — owner-gate pickup CLOSED: E12 Gemma base-model check RETIRED (option b); E13 rust-version pin scoped to publish=false only (file removed per noise-reduction)
+
+Delegated Claude verdict 2026-10-05 ruled every remaining row; `.issues/906` closed + removed (number stays spent).
+
+- **E13 — GO, scoped to `publish = false` packages ONLY.** The 2026-10-03 landing (`880619731`) had carried `rust-version.workspace = true` on all 33 manifests; the scoping REMOVES the field from the 8 crates.io-shipping crates (`katgpt-core`, `-types`, `-dec`, `-hla`, `-micro-belief`, `-personality`, `-sense`, `-sleep` — the manifests WITHOUT `publish = false`): a published rust-version is a public MSRV claim and none was measured — the crates.io family deliberately carries NO field. The root `[workspace.package] rust-version = "1.98.1"` stands, inherited by exactly the 25 publish=false packages (root + 24 members). Verified: `cargo metadata --no-deps` reports rust_version non-null on exactly those 25 (`{'1.98.1': 25}`) and null on all 8 publishable; `cargo check -p katgpt-rs --lib` green.
+- **E12 — RETIRED (option b)**: the negative stands (12/12 harmful recirc cells at a stable rate — the IT-vs-base caveat refines a negative, never flips it); paper-scale Run 3 never collected; both boxes carry only IT-tuned Gemma GGUFs; accepting the Gemma license is not an agent act; Gemma is low priority beside Bonsai. Record: `.plans/613_e12_gemma_base_model_options.md` (status RETIRED; the renumbered 611 draft).
+
 ## Issue 918 (2026-10-05) — posterior (truncated-Gumbel) inverse sampler, max-first: CLOSED (file removed per noise-reduction)
 
 Execution-class POC against a cited lineage (the posterior construction
