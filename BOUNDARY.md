@@ -42,6 +42,7 @@ Everything downstream is a consumer, never a dependency:
 |---|---|
 | Game runtime / cognition wiring | `../riir-ai` |
 | Chain / storage / training / SDK / dApps | the respective `../riir-*` repos |
+| The trained-artifact lane (the `artifacts/` convention: classes, manifests, protected remote lanes) | the artifact-owning repos (`../riir-train`, `../riir-instinct`, `../riir-rethink`; the gate lives in `../riir-ai`, the vocabulary in `../riir-reflexer`) — this repo carries NO artifact lane; its fixtures are committed repo bytes |
 
 ## May depend on
 
