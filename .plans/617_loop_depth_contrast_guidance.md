@@ -4,7 +4,7 @@
 **Research:** [katgpt-rs/.research/602_LoopCD_Recurrent_Depth_Contrast_Guidance.md](../.research/602_LoopCD_Recurrent_Depth_Contrast_Guidance.md)
 **Source paper:** [arXiv:2610.02185](https://arxiv.org/abs/2610.02185) — "Decoding Looped Transformers Better for (Almost) Free" (Apple); twin class prior art [arXiv:2609.24196](https://arxiv.org/abs/2609.24196) (EMNLP 2026)
 **Target:** `katgpt-rs/src/transformer/loop_guidance.rs` (new module) + wiring in `src/transformer/variants.rs` + Cargo feature `loop_guidance`
-**Status:** Active — Phase 4 (T4.1 verdict RECORDED: NEGATIVE, Bench 906; T4.3 open)
+**Status:** Active — Phase 4 (T4.1 verdict RECORDED: NEGATIVE, Bench 906; T4.3 DONE 2026-10-05 — the riir-ai 1025 cross-ref ran as the substrate-first audit, FUSED-DEFERRED there)
 **Classification:** Public
 
 ---
@@ -59,7 +59,7 @@ Honest scope note: no real looped checkpoint exists on this stack (Bonsai/qwen3.
 
 - [x] **T4.1** Record the adjudication verdict vs all three incumbents + the cheap-weak control; if guidance loses any G1 leg, record the negative in the research note §2.35 lineage ("the negative extends to a third lane") and keep the feature opt-in dead-or-narrow — never promote a tie; **tier upgrade to GOAT happens only at this record, only on a non-saturated fixture, only with all three incumbents beaten** **RECORDED 2026-10-03 (Bench 906): NEGATIVE — the negative extends to a third lane (847, 850, 906) and 906 is the strongest: the fixture PROVABLY has the structure the paper's mechanism needs (slope 0.50, close stratum 19, disagreement 50%) and the sweep isolates why it still fails (the k→R contrast amplifies its dominant difference component — bias/drift under any biased head; when post-burn-in makes it decision-dominated, a monotone fixture needs no correction). Feature stays opt-in, dead-or-narrow; never promoted on the ref_loop ≥ 6 tie. Reopen trigger: a real looped checkpoint with measured non-monotone close-decision churn**
 - [ ] **T4.2** Promotion to `default` **blocked** pending a production looped consumer (Plan 136 surface adoption); reopen trigger recorded in the research note **STANDING — blocked twice over now: no production looped consumer, AND the measured negative (Bench 906)**
-- [ ] **T4.3** riir-ai Issue 1025 cross-ref updated with the measured results if the deliberation analog (F2) is picked up by a game-side session
+- [x] **T4.3** riir-ai Issue 1025 cross-ref updated with the measured results if the deliberation analog (F2) is picked up by a game-side session **DONE 2026-10-05: the cross-ref ran as a full substrate-first audit (riir-ai `.issues/1025` now FUSED-DEFERRED — the Bench-906 negative + the three shipped cousins recorded; re-arm triggers in-file)**
 
 ---
 

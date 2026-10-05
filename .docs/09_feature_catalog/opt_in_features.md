@@ -4834,8 +4834,12 @@ consumer GOAT: `evolve_belief` front-end, ≤ 2 ns/NPC/tick against the
 11–12 ns envelope, `ab_timing.rs` paired protocol, λ=0 bit-identical
 default path) rides riir-ai Issue 1006.
 
-🔧 Feature flag: `habituation_filter` (katgpt-core). **OPT-IN**, with no
-consumer yet — promotion rides T2's GOAT + owner call.
+🔧 Feature flag: `habituation_filter` (katgpt-core). **OPT-IN — terminal posture**
+(2026-10-05: the perception consumer's promotion was DECLINED at the
+riir-ai delegated-owner verdict — the ≤ 2 ns bar unmet at every reading,
+best 5.45 ns; record: riir-ai HISTORY.md Issue 1006 row. The opt-in
+feature ships landed; reopen only on a hot-path consumer or a recorded
+bar revision).
 
 ## 130. attention_snr — streaming attention-SNR accumulators (Issue 882 P1 / Research 586)
 
