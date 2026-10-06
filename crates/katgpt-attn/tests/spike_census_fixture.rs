@@ -17,6 +17,14 @@ const FIXTURES: &[&str] = &[
     "Ternary-Bonsai-27B-Q2_0",
 ];
 
+/// The T2 calibration sidecars (`.calib.spcm`, emitted by the riir-ai
+/// `spike_census_calib_dump` / `_ternary` examples from the SAME model files
+/// the census sidecars name). (model, expected n_layers, expected FFN width)
+const CALIB_FIXTURES: &[(&str, usize, usize)] = &[
+    ("gemma-2-2b-it-f16", 26, 9216),
+    ("Ternary-Bonsai-27B-Q2_0", 64, 17408),
+];
+
 fn fixture_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spike_census")
 }
@@ -112,6 +120,69 @@ fn sidecars_stay_internally_consistent() {
                     b["idx"]
                 );
             }
+        }
+    }
+}
+
+/// The T2 calibration sidecars: header sanity + blake3 pin. The expected
+/// (n_layers, ffn_width) pairs pin the header against the models the census
+/// sidecars name; `observed` must be positive; stats must be finite and
+/// non-negative. (The measured VALUES are data, not pins — the T2 verdict
+/// reads them through the validator; the fixture gate only refuses
+/// corruption.)
+#[test]
+fn calib_sidecars_match_their_blake3_pins_and_headers() {
+    for (name, want_layers, want_ffn_width) in CALIB_FIXTURES {
+        let dir = fixture_dir();
+        let body = std::fs::read(dir.join(format!("{name}.calib.spcm")))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let pin = std::fs::read_to_string(dir.join(format!("{name}.calib.spcm.blake3")))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let want = pin.split_whitespace().next().expect("pin hex");
+        assert_eq!(
+            blake3::hash(&body).to_hex().to_string(),
+            want,
+            "{name}: calib sidecar does not match its pin"
+        );
+
+        let le_u32 = |off: usize| {
+            u32::from_le_bytes(body[off..off + 4].try_into().expect("u32"))
+        };
+        assert_eq!(&body[0..4], b"SPCM", "{name}: magic");
+        assert_eq!(le_u32(4), 1, "{name}: version");
+        let name_len = le_u32(8) as usize;
+        let model = String::from_utf8(body[12..12 + name_len].to_vec()).expect("model name");
+        assert_eq!(model, *name, "{name}: embedded model name");
+        let mut off = 12 + name_len;
+        let n_layers = le_u32(off) as usize;
+        off += 4;
+        let n_taps = le_u32(off) as usize;
+        off += 4;
+        assert_eq!(n_layers, *want_layers, "{name}: n_layers");
+        assert!(n_taps == 1 || n_taps == 4, "{name}: n_taps {n_taps}");
+        let mut widths = [0usize; 4];
+        for (t, w) in widths.iter_mut().enumerate().take(n_taps) {
+            *w = le_u32(off + 4 * t) as usize;
+        }
+        assert_eq!(
+            widths[n_taps - 1],
+            *want_ffn_width,
+            "{name}: ffn (last) tap width"
+        );
+        off += 4 * n_taps;
+        let observed = u64::from_le_bytes(body[off..off + 8].try_into().expect("u64"));
+        assert!(observed > 0, "{name}: zero-token calibration sidecar");
+        off += 8;
+        let total_channels: usize = widths.iter().take(n_taps).map(|&w| n_layers * w).sum();
+        // max_abs + rms arrays cover exactly n_taps × Σ(n_layers·width) f32s.
+        assert_eq!(
+            body.len() - off,
+            2 * total_channels * 4,
+            "{name}: payload size"
+        );
+        for chunk in body[off..].as_chunks::<4>().0.iter().step_by(97) {
+            let v = f32::from_le_bytes(*chunk);
+            assert!(v.is_finite() && v >= 0.0, "{name}: non-finite/negative stat");
         }
     }
 }
