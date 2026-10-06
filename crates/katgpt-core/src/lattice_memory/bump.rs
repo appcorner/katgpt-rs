@@ -74,6 +74,30 @@ pub fn axis_weights(lut: &BumpLut, delta: f32) -> AxisWeights {
     lut[idx]
 }
 
+/// The cos² 3-tap alternative — the Plan 619 T1.8 A/B arm.
+///
+/// `g(o; δ) = cos²(π(δ−o)/4)` on the same `{−1, 0, +1}` taps, normalized
+/// per axis. It exists in the SDM lineage for SGD differentiability, which
+/// this modelless primitive does not have — it is measured, not assumed:
+/// the T1.8 bench compares near-miss recovery and exact-recall dilution
+/// against the tent and pins the winner in `BumpKernel`. Two shape facts
+/// the A/B reads (both gated below): the truncated kernel is WIDER (exact
+/// hit reads `(0.25, 0.5, 0.25)` — more dilution than the tent's
+/// `(0.2, 0.6, 0.2)`), and truncation leaks mass through the ±0.5 boundary
+/// (the far tap keeps ~0.08 at the primary switch, where the tent is
+/// exactly 0 — the support is no longer ±1 cell).
+#[must_use]
+pub fn axis_weights_cos2(delta: f32) -> AxisWeights {
+    let d = delta.clamp(-0.5, 0.5);
+    let g = |off: f32| {
+        let t = core::f32::consts::FRAC_PI_4 * (d - off);
+        t.cos() * t.cos()
+    };
+    let (g0, g1, g2) = (g(-1.0), g(0.0), g(1.0));
+    let s = g0 + g1 + g2;
+    (g0 / s, g1 / s, g2 / s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{axis_weights, build_lut, weights_direct, LUT_N};
@@ -147,5 +171,26 @@ mod tests {
         assert!((p - 0.2).abs() < 1e-7 && (c - 0.6).abs() < 1e-7 && (n - 0.2).abs() < 1e-7);
         let (p, c, n) = weights_direct(0.5);
         assert!(p.abs() < 1e-7 && (c - 0.5).abs() < 1e-7 && (n - 0.5).abs() < 1e-7);
+    }
+
+    #[test]
+    fn cos2_ab_arm_sums_to_one_and_matches_known_shapes() {
+        use super::axis_weights_cos2;
+        // Partition of unity across the domain.
+        for s in 0..=512 {
+            let delta = -0.5 + s as f32 / 512.0;
+            let (a, b, c) = axis_weights_cos2(delta);
+            assert!((a + b + c - 1.0).abs() <= 1e-6, "cos² sum at δ={delta}");
+            assert!(a >= 0.0 && b >= 0.0 && c >= 0.0);
+        }
+        // Exact hit: the wider kernel's (0.25, 0.5, 0.25).
+        let (a, b, c) = axis_weights_cos2(0.0);
+        assert!((a - 0.25).abs() < 1e-6 && (b - 0.5).abs() < 1e-6 && (c - 0.25).abs() < 1e-6);
+        // Truncation leak: the far tap retains mass at the primary switch
+        // (cos²(3π/8) normalized ≈ 0.078); the near tap never falls below
+        // the center (equal is the truncation's ceiling at the boundary).
+        let (far, center, near) = axis_weights_cos2(0.5);
+        assert!(far > 0.05 && far < 0.12, "far-tap leak {far} outside the documented band");
+        assert!(near >= center - 1e-6, "near tap {near} below center {center} at δ=+0.5");
     }
 }

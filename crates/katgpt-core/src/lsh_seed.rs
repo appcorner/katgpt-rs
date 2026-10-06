@@ -54,7 +54,7 @@ mod tests {
         const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         const PRIME: u64 = 0x0000_0100_0000_01b3;
         let mut h = OFFSET;
-        let mut feed = |x: u64, h: &mut u64| {
+        let feed = |x: u64, h: &mut u64| {
             for b in x.to_le_bytes() {
                 *h ^= u64::from(b);
                 *h = h.wrapping_mul(PRIME);

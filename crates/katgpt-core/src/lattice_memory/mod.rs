@@ -9,22 +9,27 @@
 //! near-miss recall) beside Raven O(1) / Engram O(1) / δ-Mem O(r) / PKM
 //! O(√N).
 //!
+//! T1.4 arms the cells with the closed-form delta rule
+//! `S ← (I − βkkᵀ)S + βkvᵀ` (rank-1 removal along the key + rank-1 add, two
+//! `d_k·d_v` MAC passes, no gradient descent) and the per-cell
+//! read-then-blend read `Σ φ_c·(S_cᵀ q)`. T1.5 adds the occupancy-warped
+//! sizer (`sizer` + `cdf`); T1.6 the sigmoid-only scoring read.
+//!
 //! Opt-in (`feature = "lattice_memory"`) until the Plan 619 GOAT gate
 //! (T1.7) passes; the gate designs live in the plan, never here. Name
 //! disambiguation: NOT `analytic_lattice` (Plan 330 transport operators).
-//!
-//! Cycle note (T1.1+T1.2+T1.3 landing): `write_value` is the minimal
-//! cell-write the addressing/near-miss tests need; T1.4 generalizes it to
-//! the closed-form delta rule `S ← S(I−βkkᵀ)+βkvᵀ` with the
-//! forgetting/interference/alloc gates.
 
 mod address;
 mod bump;
+mod cdf;
+mod sizer;
 pub mod types;
 
 pub use address::{split_coordinate, LshAxes, AXES};
-pub use bump::{axis_weights, build_lut, weights_direct, AxisWeights, BumpLut};
-pub use types::{validate, LatticeCell, LatticeConfig, LatticeConfigError};
+pub use bump::{axis_weights, axis_weights_cos2, build_lut, weights_direct, AxisWeights, BumpLut};
+pub use cdf::CdfWarp;
+pub use sizer::{capacity_per_cell, support_radius};
+pub use types::{validate, BumpKernel, LatticeCell, LatticeConfig, LatticeConfigError};
 
 /// The 3×3 neighborhood weight row for one axis: `[prev, center, next]`.
 const TAPS: usize = 3;
@@ -37,11 +42,24 @@ struct Located {
     delta: [f32; AXES],
 }
 
+/// The within-cell read query (T1.4).
+///
+/// `Row0` is `q = e₀` — only state row 0 contributes, which is exactly the
+/// `write_value` overwrite lane; `Dense` is a caller-supplied key of width
+/// `d_k`. An enum (not `&[f32]` + a flag) because the row-0 path must not
+/// materialize an `e₀` buffer — the hot path allocates nothing.
+#[derive(Clone, Copy)]
+enum Query<'a> {
+    Row0,
+    Dense(&'a [f32]),
+}
+
 /// The lattice: seeded axes + bump table + dense cell table + flat slab.
 ///
-/// Constructed once via [`LatticeMemory::new`]; every hot-path read is a
-/// coordinate pair → 9 dense-table lookups → slab slices blended in place —
-/// zero heap allocation after construction (the G4 law, alloc-gated at T1.4).
+/// Constructed once via [`LatticeMemory::new`] (or the occupancy-fitted
+/// [`LatticeMemory::sized`]); every hot-path read is a coordinate pair →
+/// 9 dense-table lookups → slab rows blended in place — zero heap allocation
+/// after construction (the G4 law, gated by `tests/lattice_memory_gates.rs`).
 pub struct LatticeMemory {
     config: LatticeConfig,
     axes: LshAxes,
@@ -51,10 +69,15 @@ pub struct LatticeMemory {
     cells: Vec<LatticeCell>,
     /// Preallocated flat slab, `cell_count × d_k × d_v` elements. Cells claim
     /// regions from a bump cursor on first write; there is no cell
-    /// deallocation, so no free list exists.
+    /// deallocation, so no free list exists. State layout per cell: `d_k`
+    /// rows of `d_v` (row-major) — row `i` is the value-channel weight for
+    /// key component `k_i`.
     slab: Vec<f32>,
     /// Next unclaimed slab element.
     cursor: usize,
+    /// `d_v` scratch for the delta rule's `r = kᵀS` read (T1.4) — allocated
+    /// once here so `write_delta` never allocates.
+    scratch: Vec<f32>,
 }
 
 impl LatticeMemory {
@@ -73,14 +96,8 @@ impl LatticeMemory {
         );
         let cells = vec![LatticeCell::unwritten(); config.cell_count()];
         let slab = vec![0.0_f32; config.cell_count() * config.cell_len()];
-        Ok(Self {
-            config,
-            axes,
-            lut: build_lut(),
-            cells,
-            slab,
-            cursor: 0,
-        })
+        let scratch = vec![0.0_f32; config.d_v];
+        Ok(Self { config, axes, lut: build_lut(), cells, slab, cursor: 0, scratch })
     }
 
     /// The validated config this lattice was built from.
@@ -105,11 +122,18 @@ impl LatticeMemory {
 
     /// Address `x` → primary cell + both axes' fractional offsets.
     ///
-    /// Cell coordinates clamp into the grid (queries may project outside it;
-    /// the lattice's answers stay in-bounds — the read renormalizes over the
+    /// The optional CDF warp (`T1.5`) remaps the raw coordinates first —
+    /// monotone, so locality and the real fractional part survive. Cell
+    /// coordinates clamp into the grid (queries may project outside it; the
+    /// lattice's answers stay in-bounds — the read renormalizes over the
     /// clipped neighborhood).
     fn locate(&self, x: &[f32]) -> Located {
-        let c = self.axes.coordinates(x);
+        let mut c = self.axes.coordinates(x);
+        if let Some(warp) = self.config.warp.as_ref() {
+            for axis in 0..AXES {
+                c[axis] = warp[axis].apply(c[axis]);
+            }
+        }
         let mut cell = [0_i64; AXES];
         let mut delta = [0.0_f32; AXES];
         for axis in 0..AXES {
@@ -123,11 +147,79 @@ impl LatticeMemory {
         Located { row, col, delta }
     }
 
-    /// Write `v` as THE value of the cell `x` addresses (minimal write —
-    /// T1.4 replaces this with the delta-rule update; the signature stays).
+    /// **Delta-rule cell write** (T1.4): the cell `x` addresses gets
     ///
-    /// First write claims the cell's slab region; re-writes overwrite the
-    /// claimed region in place (the slab never grows).
+    /// ```text
+    /// S ← (I − βkkᵀ)S + βkvᵀ      (the plan's S(I−βkkᵀ) + βkvᵀ in its
+    ///                              row-vector spelling)
+    /// ```
+    ///
+    /// evaluated closed-form in two `d_k·d_v` MAC passes — `r = kᵀS` (the
+    /// state's read along the key), then the rank-1
+    /// `S += β·k⊗(v − r)` — no gradient descent, no per-write heap (the
+    /// scratch is a preallocated field). With β‖k‖² = 1 (unit keys, β = 1)
+    /// the update removes the state along `k` EXACTLY: overwriting the same
+    /// key replaces its association; near-collinear keys leave the
+    /// measured Π-contracting interference the module tests document.
+    ///
+    /// `β` must be in `(0, 1]` — the contractive range (β > 1 amplifies old
+    /// associations instead of removing them).
+    ///
+    /// # Panics
+    /// On a `k`/`v` width mismatch, or `β` outside `(0, 1]`.
+    pub fn write_delta(&mut self, x: &[f32], k: &[f32], v: &[f32], beta: f32) {
+        assert_eq!(k.len(), self.config.d_k, "key width must be d_k");
+        assert_eq!(v.len(), self.config.d_v, "value width must be d_v");
+        assert!(beta > 0.0 && beta <= 1.0, "beta must be in (0, 1], got {beta}");
+        let located = self.locate(x);
+        let idx = located.row * self.config.grid[1] as usize + located.col;
+        let len = self.config.cell_len();
+        if !self.cells[idx].is_written() {
+            let offset = self.cursor;
+            self.cursor += len;
+            self.cells[idx] = LatticeCell {
+                offset: offset as u32,
+                len: len as u32,
+                writes: 0,
+            };
+        }
+        let cell = self.cells[idx];
+        let d_v = self.config.d_v;
+        let base = cell.offset as usize;
+        let (scratch, slab) = (&mut self.scratch, &mut self.slab);
+        // Pass 1: r = kᵀS — the state's read along the key, before mutation.
+        let r = &mut scratch[..d_v];
+        r.fill(0.0);
+        for (i, &ki) in k.iter().enumerate() {
+            if ki == 0.0 {
+                continue; // sparse-key fast skip (row 0 only ⇒ the e₀ lane)
+            }
+            let row = &slab[base + i * d_v..base + (i + 1) * d_v];
+            for (rj, &s) in r.iter_mut().zip(row.iter()) {
+                *rj += ki * s;
+            }
+        }
+        // Pass 2: S += β·k⊗(v − r) — the rank-1 remove-along-k + add.
+        for (i, &ki) in k.iter().enumerate() {
+            let g = beta * ki;
+            if g == 0.0 {
+                continue;
+            }
+            let row = &mut slab[base + i * d_v..base + (i + 1) * d_v];
+            for (sj, (&vj, &rj)) in row.iter_mut().zip(v.iter().zip(r.iter())) {
+                *sj += g * (vj - rj);
+            }
+        }
+        self.cells[idx].writes += 1;
+    }
+
+    /// Write `v` as THE value of the cell `x` addresses — the overwrite lane.
+    ///
+    /// This is `write_delta(x, e₀, v, 1.0)` evaluated exactly: `r` is state
+    /// row 0, then row 0 `+= (v − r)` ⇒ row 0 = `v` — kept specialized (no
+    /// `e₀` buffer, one memcpy) so the simple association path stays the
+    /// cheapest. First write claims the cell's slab region; re-writes
+    /// overwrite the claimed region in place (the slab never grows).
     pub fn write_value(&mut self, x: &[f32], v: &[f32]) {
         assert_eq!(v.len(), self.config.d_v, "value width must be d_v");
         let located = self.locate(x);
@@ -145,34 +237,65 @@ impl LatticeMemory {
         let cell = self.cells[idx];
         let d_v = self.config.d_v;
         let dst =
-            &mut self.slab[cell.offset as usize..cell.offset as usize + cell.len as usize];
-        // State layout: d_k rows × d_v — the value broadcast across the key
-        // rows is T1.4's delta-rule concern; today the first d_v lane holds
-        // `v` and the rest stay zero (unwritten key rows read as no-op).
-        dst[..d_v].copy_from_slice(v);
+            &mut self.slab[cell.offset as usize..cell.offset as usize + d_v];
+        dst.copy_from_slice(v);
         self.cells[idx].writes += 1;
     }
 
-    /// The φ-blended read at `x`: Σ_cells φ(cell) · state, written into
-    /// `out` (caller-owned — the hot path allocates nothing).
-    ///
-    /// φ is the raw kernel product normalized over its IN-GRID geometric
-    /// support (the plan's separable denominator — interior queries sum to
-    /// ≈ 1, grid-edge queries renormalize over the clipped neighborhood).
-    /// Unwritten cells contribute NO STATE but their φ stays in the
-    /// denominator: sparsity attenuates the read — the graded near-miss
-    /// recovery G5 gates (renormalizing over written cells instead would
-    /// read a flat 1.0 across the whole support, a wider cliff than
-    /// Engram's). Read-then-blend, never sum-then-read (T1.4's law).
+    /// The φ-blended read at `x` with the row-0 (overwrite-lane) query —
+    /// [`read_cells`](Self::read_cells) with `q = e₀`, no `e₀` buffer.
     pub fn read_blend(&self, x: &[f32], out: &mut [f32]) {
+        self.read_impl(x, Query::Row0, out);
+    }
+
+    /// The φ-blended delta-rule read at `x`: `Σ_cells φ(cell)·(S_cᵀ q)`,
+    /// written into `out` (caller-owned — the hot path allocates nothing).
+    ///
+    /// Per-cell read-then-blend (the T1.4 law): each written cell in the 3×3
+    /// neighborhood contributes `φ_c·(S_cᵀ q)` by row-wise direct
+    /// accumulation — `9 × d_k` row MACs at `d_v` wide — and no cross-cell
+    /// state is ever materialized (sum-then-read would need a `d_k·d_v`
+    /// scratch AND read every row of every cell).
+    pub fn read_cells(&self, x: &[f32], q: &[f32], out: &mut [f32]) {
+        assert_eq!(q.len(), self.config.d_k, "query width must be d_k");
+        self.read_impl(x, Query::Dense(q), out);
+    }
+
+    /// [`read_cells`](Self::read_cells) plus the **sigmoid-only content
+    /// score** (T1.6): `σ(λ·(2·wf − 1))` where `wf` is the fraction of the
+    /// query's in-grid kernel mass landing on WRITTEN cells.
+    ///
+    /// This is the routing/content factorization the consumer needs in one
+    /// pass: the read IS the content, the score IS the routing confidence —
+    /// full coverage → `σ(λ)`, empty support → `σ(−λ)`, half → 0.5. Sigmoid,
+    /// never softmax (the project law — gated by the module's grep test);
+    /// the shared `crate::sigmoid` is the substrate kernel.
+    ///
+    /// `λ` must be finite and `> 0` (it is a slope, not a probability).
+    #[must_use]
+    pub fn read_scored(&self, x: &[f32], q: &[f32], out: &mut [f32], lambda: f32) -> f32 {
+        assert_eq!(q.len(), self.config.d_k, "query width must be d_k");
+        assert!(lambda > 0.0 && lambda.is_finite(), "lambda must be finite > 0");
+        let wf = self.read_impl(x, Query::Dense(q), out);
+        crate::sigmoid(lambda * (2.0 * wf - 1.0))
+    }
+
+    /// The shared read body — blends the neighborhood into `out` and returns
+    /// the written-mass fraction of the in-grid kernel mass (the T1.6 score
+    /// input; `0.0` for an all-empty support).
+    fn read_impl(&self, x: &[f32], query: Query<'_>, out: &mut [f32]) -> f32 {
         assert_eq!(out.len(), self.config.d_v, "out width must be d_v");
         out.fill(0.0);
         let located = self.locate(x);
         let (w_row, w_col) = self.neighborhood_weights(located.delta);
         let d_v = self.config.d_v;
+        let d_k = self.config.d_k;
         let grid1 = self.config.grid[1] as usize;
-        // The kernel's in-grid mass — data-independent, computed first.
+        // The kernel's in-grid mass — data-independent shape walk, computed
+        // first; the written share rides the same walk (cell-table reads
+        // only).
         let mut mass = 0.0_f32;
+        let mut written_mass = 0.0_f32;
         for (ri, &wr) in w_row.iter().enumerate() {
             let r = located.row as i64 + ri as i64 - 1;
             if r < 0 || r >= i64::from(self.config.grid[0]) {
@@ -181,12 +304,16 @@ impl LatticeMemory {
             for (ci, &wc) in w_col.iter().enumerate() {
                 let c = located.col as i64 + ci as i64 - 1;
                 if c >= 0 && c < i64::from(self.config.grid[1]) {
-                    mass += wr * wc;
+                    let phi = wr * wc;
+                    mass += phi;
+                    if self.cells[r as usize * grid1 + c as usize].is_written() {
+                        written_mass += phi;
+                    }
                 }
             }
         }
         if mass <= f32::EPSILON {
-            return;
+            return 0.0;
         }
         for (ri, &wr) in w_row.iter().enumerate() {
             let r = located.row as i64 + ri as i64 - 1;
@@ -203,27 +330,55 @@ impl LatticeMemory {
                 if !cell.is_written() {
                     continue;
                 }
-                let src =
-                    &self.slab[cell.offset as usize..cell.offset as usize + d_v];
-                for (o, &s) in out.iter_mut().zip(src.iter()) {
-                    *o += phi * s;
+                let base = cell.offset as usize;
+                match query {
+                    Query::Row0 => {
+                        let src = &self.slab[base..base + d_v];
+                        for (o, &s) in out.iter_mut().zip(src.iter()) {
+                            *o += phi * s;
+                        }
+                    }
+                    Query::Dense(q) => {
+                        for (i, &qi) in q.iter().take(d_k).enumerate() {
+                            if qi == 0.0 {
+                                continue;
+                            }
+                            let w = phi * qi;
+                            let row = &self.slab[base + i * d_v..base + (i + 1) * d_v];
+                            for (o, &s) in out.iter_mut().zip(row.iter()) {
+                                *o += w * s;
+                            }
+                        }
+                    }
                 }
             }
         }
+        written_mass / mass
     }
 
-    /// Per-axis 3-tap weights for both axes at once (one LUT pair).
+    /// Per-axis 3-tap weights for both axes at once, dispatched on the
+    /// configured kernel (T1.8's tunable).
     #[must_use]
     fn neighborhood_weights(&self, delta: [f32; AXES]) -> ([f32; TAPS], [f32; TAPS]) {
-        let (r0, r1, r2) = axis_weights(&self.lut, delta[0]);
-        let (c0, c1, c2) = axis_weights(&self.lut, delta[1]);
-        ([r0, r1, r2], [c0, c1, c2])
+        match self.config.bump_kernel {
+            BumpKernel::Tent => {
+                let (r0, r1, r2) = axis_weights(&self.lut, delta[0]);
+                let (c0, c1, c2) = axis_weights(&self.lut, delta[1]);
+                ([r0, r1, r2], [c0, c1, c2])
+            }
+            BumpKernel::Cos2 => {
+                let (r0, r1, r2) = axis_weights_cos2(delta[0]);
+                let (c0, c1, c2) = axis_weights_cos2(delta[1]);
+                ([r0, r1, r2], [c0, c1, c2])
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::types::LatticeConfig;
+    use super::cdf::CdfWarp;
+    use super::types::{BumpKernel, LatticeConfig, LatticeConfigError};
     use super::LatticeMemory;
 
     fn config(grid: [u32; 2], w: [f32; 2]) -> LatticeConfig {
@@ -235,7 +390,16 @@ mod tests {
             w,
             seed: 42,
             byte_budget: None,
+            warp: None,
+            bump_kernel: BumpKernel::Tent,
         }
+    }
+
+    /// A unit key along `i`, `d_k`-wide, allocated per call (test-only).
+    fn unit_key(i: usize, d_k: usize) -> Vec<f32> {
+        let mut k = vec![0.0_f32; d_k];
+        k[i] = 1.0;
+        k
     }
 
     #[test]
@@ -243,13 +407,13 @@ mod tests {
         let bad = config([0, 4], [1.0, 1.0]);
         assert!(matches!(
             LatticeMemory::new(bad),
-            Err(super::LatticeConfigError::ZeroDimension)
+            Err(LatticeConfigError::ZeroDimension)
         ));
         let mut big = config([4, 4], [1.0, 1.0]);
         big.byte_budget = Some(16); // slab needs 16·4·4·4 = 1024 B
         assert!(matches!(
             LatticeMemory::new(big),
-            Err(super::LatticeConfigError::OverBudget { .. })
+            Err(LatticeConfigError::OverBudget { .. })
         ));
     }
 
@@ -340,5 +504,254 @@ mod tests {
         a.read_blend(&[0.2; 16], &mut oa);
         b.read_blend(&[0.2; 16], &mut ob);
         assert_eq!(oa, ob);
+    }
+
+    // ── T1.4: the delta rule ──────────────────────────────────────────────
+
+    #[test]
+    fn delta_overwrite_removes_along_k() {
+        // The forgetting law: with unit keys and β = 1 the update removes
+        // the state along k EXACTLY — overwriting (k, v_a) with (k, v_b)
+        // leaves the v_b component as the read's whole direction and the
+        // v_a component at float noise. Assertions are RATIO-based: the
+        // read blends the 3×3 neighborhood, so the absolute scale is the
+        // primary cell's φ (≈ 0.36 interior) — the law is in the direction.
+        let mut lat = LatticeMemory::new(config([32, 32], [2.0, 2.0])).unwrap();
+        let x = [0.4_f32; 16];
+        let k = [0.5_f32, 0.5, 0.5, 0.5]; // unit: ‖k‖² = 1
+        let v_a = [1.0_f32, 0.0, 0.0, 0.0];
+        let v_b = [0.0_f32, 1.0, 0.0, 0.0]; // ⊥ v_a
+        lat.write_delta(&x, &k, &v_a, 1.0);
+        let mut out = [0.0_f32; 4];
+        lat.read_cells(&x, &k, &mut out);
+        let a_scale = out[0];
+        assert!(
+            a_scale > 0.2 && out[1].abs() < 1e-4 * a_scale,
+            "first association must be the read's whole direction: {out:?}"
+        );
+        lat.write_delta(&x, &k, &v_b, 1.0);
+        lat.read_cells(&x, &k, &mut out);
+        let b_scale = out[1];
+        assert!(
+            b_scale > 0.2,
+            "new value must dominate after overwrite: {out:?}"
+        );
+        let old_recall = out[0] / b_scale;
+        assert!(
+            old_recall.abs() < 1e-4,
+            "old value must be REMOVED along k (recall ≈ 0 relative), got {old_recall}"
+        );
+        // The exact-arithmetic identity: after two same-key β=1 writes the
+        // state is k·v_bᵀ alone — every other component is float noise.
+        assert!((out[2] / b_scale).abs() < 1e-4 && (out[3] / b_scale).abs() < 1e-4);
+    }
+
+    #[test]
+    fn near_collinear_interference_documented() {
+        // W near-collinear overwrites: the first value's survival matches
+        // the exact single-step anchor, and after the full chain the v₁
+        // association is destroyed — every later read sits at the sin²θ
+        // noise scale, ≪ the original. (NOT asserted: per-step monotonicity
+        // of the k₁-component — the (I − kkᵀ) products contract the channel
+        // vector's NORM, but its k₁-component can rotate; the measured
+        // recalls below ARE the documented interference record.)
+        let d_k = 4;
+        let mut cfg = config([16, 16], [2.0, 2.0]);
+        cfg.d_k = d_k;
+        let mut lat = LatticeMemory::new(cfg).unwrap();
+        let x = [0.2_f32; 16];
+        // k₁ = e₀; overwrites at angle θ around it.
+        let k1 = unit_key(0, d_k);
+        let theta = 0.1_f32;
+        let v1 = [1.0_f32, 0.0, 0.0, 0.0];
+        lat.write_delta(&x, &k1, &v1, 1.0);
+        let mut recall = Vec::new();
+        let mut out = [0.0_f32; 4];
+        lat.read_cells(&x, &k1, &mut out);
+        recall.push(out[0]);
+        let mut first_cos = 1.0_f32; // cos(k₁, k₂) — the anchor's cosine
+        for w in 1..8_usize {
+            let mut kw = unit_key(0, d_k);
+            kw[1] = theta * (w as f32 * 0.7).sin(); // deterministic, < 1
+            let n = (kw[0] * kw[0] + kw[1] * kw[1]).sqrt();
+            kw[0] /= n;
+            kw[1] /= n;
+            if w == 1 {
+                first_cos = kw[0]; // k₁ = e₀ ⇒ k₁ᵀk_w = kw[0]
+            }
+            // Orthogonal marker values keep the v₁ channel separable.
+            let mut vw = [0.0_f32; 4];
+            vw[1 + (w % 3)] = 1.0;
+            lat.write_delta(&x, &kw, &vw, 1.0);
+            lat.read_cells(&x, &k1, &mut out);
+            recall.push(out[0]);
+        }
+        // Anchor: after the FIRST overwrite the v₁ survival factor is the
+        // read RATIO recall[1]/recall[0] (the read blends, so absolutes are
+        // φ-scaled) and equals 1 − (k₁ᵀk₂)² exactly (k₁ᵀ(I − k₂k₂ᵀ)k₁ with
+        // unit vectors).
+        let survival_1 = recall[1] / recall[0];
+        let expected = 1.0 - first_cos * first_cos;
+        assert!(
+            (survival_1 - expected).abs() < 1e-3,
+            "first-overwrite survival {survival_1} must ≈ 1 − (k₁ᵀk₂)² = {expected}"
+        );
+        // Destroyed: every post-overwrite read is ≤ 2% of the original
+        // association (measured ~0.5%), vs the 100% before the chain.
+        for w in 1..recall.len() {
+            assert!(
+                recall[w].abs() <= 0.02 * recall[0],
+                "overwrite {w} left recall {:+.5} above the noise scale (original {:.5}): {recall:?}",
+                recall[w],
+                recall[0]
+            );
+        }
+        // And the chain's FINAL read is no larger than the first step's —
+        // the interference stays bounded at the sin²θ scale, it does not
+        // re-grow.
+        assert!(
+            recall[recall.len() - 1].abs() <= recall[1].abs() * 3.0,
+            "final recall {:+.5} escaped the first-step scale {:+.5}",
+            recall[recall.len() - 1],
+            recall[1]
+        );
+    }
+
+    #[test]
+    fn write_value_is_the_row0_delta_lane() {
+        // The two write paths agree on the lane they share: write_value
+        // followed by a dense e₀ read == write_value + read_blend.
+        let mut lat = LatticeMemory::new(config([16, 16], [2.0, 2.0])).unwrap();
+        let x = [0.6_f32; 16];
+        let v = [0.5_f32, -0.25, 1.0, 0.0];
+        lat.write_value(&x, &v);
+        let e0 = unit_key(0, 4);
+        let mut dense = [0.0_f32; 4];
+        let mut blend = [0.0_f32; 4];
+        lat.read_cells(&x, &e0, &mut dense);
+        lat.read_blend(&x, &mut blend);
+        for (a, b) in dense.iter().zip(blend.iter()) {
+            assert!((a - b).abs() < 1e-6, "row-0 paths disagree: {dense:?} vs {blend:?}");
+        }
+    }
+
+    // ── T1.6: sigmoid-only scoring ────────────────────────────────────────
+
+    #[test]
+    fn scoring_is_sigmoid_shaped_in_written_coverage() {
+        // Full written support → score near σ(λ); empty → near σ(−λ); the
+        // score is in (0, 1) always and rises with coverage. "Full" needs a
+        // DENSE region — one write leaves the query's 3×3 support mostly
+        // unwritten by construction (the sparsity attenuation IS the law).
+        let mut lat = LatticeMemory::new(config([16, 16], [1.0, 1.0])).unwrap();
+        let x = [0.35_f32; 16];
+        let k = unit_key(0, 4);
+        let mut out = [0.0_f32; 4];
+        let empty = lat.read_scored(&x, &k, &mut out, 4.0);
+        assert!(empty < 0.05, "empty support must score ≈ σ(−4), got {empty}");
+        // Dense coverage: 1000 jittered writes around x fill the cells of
+        // x's neighborhood (16×16 grid, w=1 — the jitter stays within a few
+        // cells of x on every axis).
+        let mut rng = fastrand::Rng::with_seed(0x619_0616);
+        for _ in 0..1000 {
+            let mut q = x;
+            for v in q.iter_mut() {
+                *v += rng.f32() * 0.8 - 0.4;
+            }
+            lat.write_value(&q, &[1.0; 4]);
+        }
+        let full = lat.read_scored(&x, &k, &mut out, 4.0);
+        assert!(full > 0.9, "densely-written support must score ≈ σ(+4), got {full}");
+        assert!(empty < full && (0.0..=1.0).contains(&empty) && (0.0..=1.0).contains(&full));
+        // λ scales the sharpness: a small λ pulls both ends toward 0.5.
+        let soft = lat.read_scored(&x, &k, &mut out, 0.2);
+        assert!(soft > empty && soft < full && (soft - 0.5).abs() < 0.06);
+    }
+
+    #[test]
+    fn sigmoid_only_law_grep_gate() {
+        // The project law (sigmoid, never the banned normalizer) as a grep
+        // gate over every file in this module, production AND test code.
+        // Comment-stripped first (documentation may DISCUSS the law); the
+        // needle is assembled from parts so this gate's own source cannot
+        // trip it.
+        let needle = format!("soft{}", "max");
+        for (file, src) in [
+            ("mod.rs", include_str!("mod.rs")),
+            ("address.rs", include_str!("address.rs")),
+            ("bump.rs", include_str!("bump.rs")),
+            ("cdf.rs", include_str!("cdf.rs")),
+            ("sizer.rs", include_str!("sizer.rs")),
+            ("types.rs", include_str!("types.rs")),
+        ] {
+            let code = strip_comments(src).to_ascii_lowercase();
+            assert!(
+                !code.contains(&needle),
+                "{file} names the banned normalizer in CODE — the project law is sigmoid-only"
+            );
+        }
+    }
+
+    /// Naive comment stripper for the grep gate: drops `//`-to-EOL and
+    /// `/* */` regions, leaves everything else. String literals are not
+    /// tracked (a `"//"` inside a string would clip the rest of a line —
+    /// harmless here: the gate only ever needs to NOT see the word, and a
+    /// clipped line cannot manufacture one).
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut chars = src.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '/' if chars.peek() == Some(&'/') => {
+                    for n in chars.by_ref() {
+                        if n == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    let mut closed = false;
+                    while let Some(n) = chars.next() {
+                        if n == '*' && chars.peek() == Some(&'/') {
+                            chars.next();
+                            closed = true;
+                            break;
+                        }
+                    }
+                    assert!(closed, "unterminated block comment in module source");
+                }
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    // ── T1.5 smoke: the warp rides the config end-to-end ─────────────────
+
+    #[test]
+    fn warped_lattice_stays_local_and_graded() {
+        // A hand-fitted warp on an identity-ish projection: locality and
+        // graded near-miss must survive the remap (the sizer's end-to-end
+        // histogram gate lives in sizer.rs).
+        let mut cfg = config([64, 64], [1.0, 1.0]);
+        cfg.warp = Some([
+            CdfWarp { mean: 0.0, inv_std: 1.0, cells: 64.0 },
+            CdfWarp { mean: 0.0, inv_std: 1.0, cells: 64.0 },
+        ]);
+        let mut lat = LatticeMemory::new(cfg).unwrap();
+        let key = [0.5_f32; 16];
+        lat.write_value(&key, &[1.0; 4]);
+        let cell = lat.primary_cell(&key);
+        // A small perturbation must stay within ±1 cell on both axes.
+        let mut q = key;
+        q[3] += 0.01;
+        let cell2 = lat.primary_cell(&q);
+        assert!(cell2[0].abs_diff(cell[0]) <= 1 && cell2[1].abs_diff(cell[1]) <= 1);
+        // And the read must still be graded, not a cliff.
+        let mut out = [0.0_f32; 4];
+        lat.read_blend(&q, &mut out);
+        assert!(out.iter().sum::<f32>() > 0.0, "warped near-miss read a cliff");
     }
 }

@@ -4293,3 +4293,29 @@ required-features = ["minmax_partition"]
 [[test]]
 name = "minmax_partition_alloc_check"
 required-features = ["minmax_partition"]
+
+# Plan 619 T1.4/T1.6 — the delta-rule + scoring gate surface: G4 zero-alloc
+# hot path (counting allocator, Issue-741 profile rule — the allocator arms
+# sit behind any(debug_assertions, alloc_tracking) in-file and the disclosure
+# test always runs), the sized constructor, the no-softmax grep gate.
+[[test]]
+name = "lattice_memory_gates"
+required-features = ["lattice_memory"]
+
+# Plan 619 T1.7/T1.8 — the family GOAT: G1 recall@1 vs brute force, G2 flat
+# read latency vs N (vs PKM O(√N) + Engram O(1), interleaved best-of-arms),
+# G3 forgetting ≥ Engram, G5 near-miss graded vs Engram's hash cliff (the
+# Claim A differentiator), G4 alloc-free (alloc_tracking profile), G6 the
+# memory column, and the cos²-vs-tent kernel A/B pin.
+[[bench]]
+name = "bench_919_lattice_goat"
+harness = false
+required-features = ["lattice_memory", "engram"]
+
+# Rider (Plan 619 posture sweep, 2026-10-07): the example imports
+# karc_forecaster-gated names (FourierBasis/KarcBasis/KarcForecaster) and
+# failed the `--no-default-features --all-targets` posture with E0432 —
+# the repo-birth discipline's required-features row, landed late.
+[[example]]
+name = "karc_deployed_shape_quality"
+required-features = ["karc_forecaster"]
