@@ -4270,3 +4270,28 @@ core feature; precise dep for riir-reflexer). Deps `rayon`, `blake3`,
 - T3 G2 — 0.321–0.332 vs base 0.322–0.344 ms/decision (AC, load 4.33).
 - T5 — `Genome::champion_hybrid()` pins `68cae9d382014662`; evolved values
   live in the private loop.
+
+## Issue 919 T1 (2026-10-06) — the weight-derived spike census landed (Research 605)
+
+`crates/katgpt-attn/examples/spike_census.rs`: offline GGUF scan scoring
+s(k,i) = |W_down(k,i)|·‖γ⊙W_gate(i)‖·‖γ⊙W_up(i)‖ per FFN block (Research
+605's dominant-rank-1 screening stat), γ folded by arch (ffn_norm →
+post_attention_norm for the qwen3.5/GDN packs, which carry NO pre-FFN
+norm), BLAKE3 sidecar + Table-1 locality verdict, Bonsai scale-aware arm
+(type 42|142, byte-identical relabels). Example-local GGUF reader per the
+asentmax precedent, extended Q8_0/Q4_K/Q6_K (q6k port copied from
+riir-infer, never re-derived). **The self-test caught a real precedent
+bug**: asentmax_p07_gen_fixture's f16 subnormal conversion is off by one
+(113−e vs 112−e) — every f16 subnormal read 2× large; never caught because
+its gates never exercise subnormals. This copy is correct + pinned.
+
+Census verdict on the four available packs: Bonsai-8B shows the clean
+Table-1 shape (strict step-down spikes {34,35} at 16–21× median);
+Bonsai-27B shows the inject-early/cancel-late shape softly (emerging
+{0,2,61,62,63}) with ONE channel (k=3994) topping all five flagged blocks
+— the paper's shared-structure prediction; gemma-2-2b (sandwich+QKNorm)
+reads weak (emerging {1,2,6} early-only) — the paper's suppression
+prediction on a model it did not test. Sidecars committed under
+`tests/fixtures/spike_census/` with BLAKE3 pins + a consistency gate
+(`tests/spike_census_fixture.rs`). T2 (calibration-forward precision/
+recall) is the next gate; nothing is promoted.

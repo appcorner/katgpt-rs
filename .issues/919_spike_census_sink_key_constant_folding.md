@@ -1,6 +1,6 @@
 # Issue 919: Spike Census + Delimiter-Sink Constancy PoC (Research 605)
 
-**Status:** Active — POC filed from Research 605 (arXiv:2603.05498, "The Spike, the Sparse and the Sink", ICML 2026)
+**Status:** Active — **T1 LANDED 2026-10-06** (`examples/spike_census.rs` + the fixture-gated sidecars; census verdict below); T2 (calibration-forward validation) is the next gate; T4/T5 (delimiter sink) untouched
 
 ## Summary
 
@@ -12,7 +12,43 @@ Modelless, weight-only extractions from the paper's causal anatomy, PoC-gated be
 
 ## Tasks
 
-- [ ] **T1 — census implementation (primary).** Offline scan over a loaded GGUF: per FFN block, threshold scan on `|W_down|` with **the stored per-block γ folded into gate/up rows**; score collinear-gain candidates; emit census sidecar (spike channels + step-up/step-down block indices + `s⋆`). **Named arm: the Bonsai scale-aware variant** — ternary `W_down` entries are `{−1, 0, +1}` × group scale, so an entry-magnitude scan collapses; score dequantized weights or the group scales directly. Block-locality check against the paper's Table 1 pattern (1–2 early, 1–2 late).
+- [x] **T1 — census implementation (primary).** LANDED 2026-10-06:
+  `crates/katgpt-attn/examples/spike_census.rs` — offline GGUF scan, per FFN
+  block: |W_down| log-z screen (skipped → rank-all when it fires nothing:
+  the weak-spike models need it), score s(k,i) = |W_down(k,i)|·‖γ⊙W_gate(i)‖·
+  ‖γ⊙W_up(i)‖ over screened candidates (else all entries), top-K channels,
+  trigger direction s⋆ = normalized γ⊙W_gate(i_top), collinearity cos(g,u),
+  BLAKE3-committable canonical-JSON sidecar + Table-1 locality verdict
+  (strict spike blocks ≥10× median; soft "emerging" tier ≥2× so end
+  shapes stay visible). γ by arch: ffn_norm.{gamma,weight}, else
+  post_attention_norm.weight (qwen3.5/GDN-family has NO pre-FFN norm —
+  the FFN consumes post_attention_norm directly — auto-resolved per
+  block), else γ=1 with gamma_found=false. Bonsai scale-aware arm: type
+  42/142 (byte-identical relabels per riir-infer gguf_loader.rs) → z-screen
+  skipped, group scales carry the signal. Reader: example-local minimal
+  GGUF v3 reader per the asentmax_p07_gen_fixture precedent, extended
+  (Q8_0/Q4_K/Q6_K per riir-infer's fixture-gate-proven q6k port — copied,
+  never re-derived; >2-dim header tensors skipped, the DFlash2 fork has
+  3-dim conv-state tensors). **Self-test catches a REAL precedent bug**:
+  the asentmax f16 subnormal path is off by one (113−e vs 112−e — every
+  f16 subnormal read 2× large; its gates never exercise subnormals); this
+  copy is correct + pinned (0x0001 → 2⁻²⁴). Gates: 4 unit tests (planted-
+  spike recovery continuous + scale-aware, (1+γ) score ratio = num/den
+  exact-to-0.1%, Q4_K scale packing) + `--self-test` + the fixture gate
+  (`tests/spike_census_fixture.rs`: BLAKE3 pins + internal consistency of
+  the committed sidecars).
+  **Census verdict (T1 arm, all four available packs):**
+  | model | arch | blocks | verdict |
+  |---|---|---|---|
+  | gemma-2-2b-it (F16) | gemma2 (sandwich+QKNorm) | 26 | end_concentrated — emerging {1,2,6} early-only at 2-2.4× median: WEAK spikes, matching the paper's sandwich→520 / +QKNorm→92 suppression on a model the paper did not test |
+  | Ternary-Bonsai-8B (42) | qwen3 | 36 | **matches_table1_shape — STRICT spikes {34,35} step-down at 16-21× median** |
+  | Ternary-Bonsai-27B (142) | qwen35 (GDN hybrid) | 64 | end_concentrated — emerging {0,2} step-up + {61,62,63} step-down (2-5× median): the inject-early/cancel-late shape, softly; **channel k=3994 is the top spike channel in ALL FIVE flagged blocks** (the paper's shared-structure prediction) |
+  | Qwen3.8-27B-DFlash2 (Q4_K_M) | dflash | 5 | draft tower (5 blocks), no strict spikes; Q4_K/Q6_K dequant validated end-to-end |
+  Sidecars: `tests/fixtures/spike_census/*.json` + `.blake3`
+  (gemma-2 `44963ace…039b8` · bonsai-8B `f52f5456…67fd1` · bonsai-27B
+  `cf47f898…9aea5`). γ-fold materially moved the 27B verdict (blk 63 s
+  +48%, emerging set {0,1,2,63} → {0,2,61,62,63}) — the fold is
+  load-bearing, as the research warned.
 - [ ] **T2 — census validation (primary).** One calibration forward per model: per-channel max activations at predicted blocks; census precision/recall. Targets: gemma-2-2b-it (falsifiable prediction: sandwich-family norms ⇒ weaker spikes than a Llama-class 2B; GeGLU — quadratic approx holds since `GELU(x) ≈ x` for large positive x, but the amplifier constant differs; γ via `(1+γ)`), a Qwen3.8-class FA model, and **Bonsai via the scale-aware arm**.
 - [ ] **T3 — census → quant policy (primary, expected-value center).** Per-channel scale exemption / mixed precision exactly on census channels of census blocks in the quant lanes (riir-infer EXL3/GDN consumption cross-ref); measure quality at equal bit budget vs per-block absmax (the 487 Q8KV gap). This is the measurable-gain leg — GOAT-gate it here first.
 - [ ] **T4 — delimiter-sink constancy probe (secondary).** Delimiter-class sinks only (not position 0 — that class is exact by construction and tells us nothing): across N prompts × layers × heads, extract **pre-RoPE K and V separately** per sink position; measure cross-prompt cosine + effective subspace rank (paper: keys collapse to 1–2 dims of `W_K` row space). Go/no-go bar: cos > 0.99 per class.
