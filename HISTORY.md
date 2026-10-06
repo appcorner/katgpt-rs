@@ -2,6 +2,36 @@ Compacted 2026-10-06: every `##` heading kept verbatim, one compact entry per
 record (≤2 short lines); the full pre-compaction text is in git history.
 Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## Issue 919 (2026-10-06 → closed 2026-10-07) — spike census + delimiter-sink PoC: CLOSED — census channel key REFUTED; measured-diagonal KV exemption + delimiter folding both NO-GO (file removed per noise-reduction)
+
+Filed from Research 605 (arXiv:2603.05498). Nothing promoted; three
+hash-pinned verdicts:
+
+- **T1 census** (`ff2f40e64`): weight-derived FFN spike census over four
+  packs — Bonsai-8B matches_table1_shape, gemma-2-2b weak (sandwich+QKNorm
+  suppression confirmed on an untested model); self-test caught the asentmax
+  f16 subnormal off-by-one. Sidecars + blake3 pins:
+  `tests/fixtures/spike_census/`.
+- **T2 channel screen REFUTED** (`eccb13b9c`): census top-K vs measured
+  channel maxima P@4 = 0 on both cells — the stat screens big weight-rows,
+  not activation-carrying channels; block-level Spearman +0.48 survives.
+- **T3 measured-diagonal KV exemption NO-GO** (cell 1 `0952590e1` /
+  riir-infer `47efae7`; decisive cell 2 `3c7fe7709` / riir-infer `9ebf3e2` +
+  `d91971b`): gemma G-MAIN PASS but thin (+0.0008 ppl vs seeded-random
+  equal-budget); Bonsai-27B G-MAIN NEGATIVE, G-487 Δ −0.0011 — **QK-norm
+  squashes per-channel scale upstream of the cache, so the 487 Q8KV-gap
+  premise does not apply on QK-normed archs.** Same lane fixed the
+  riir-infer `QuantizedKvMirror` multi-layer refresh bug the G0 control
+  exposed (`47efae7`; Issue-013 absolute-PPL caveat recorded).
+- **T4 delimiter-sink constancy NEGATIVE** (`3b800c932` / riir-infer
+  `b473196`): pre-RoPE K is context-dominated, not constant — pooled cos
+  0.80–0.89, worst per-cell median 0.37–0.50 vs the pre-registered 0.99
+  bar; V worse everywhere. Conditional T5 never opened.
+- **T6** satisfied as a pointer: the census artifact stays supplied to
+  riir-train Issue 614 T4 (the merge-drift consumer). The FFN-side surface
+  (down_proj inputs, the 140–581× class) is deliberately UNFILED — backlog
+  only, if ever re-opened.
+
 ## Issue 906 (2026-10-05) — owner-gate pickup CLOSED: E12 Gemma base-model check RETIRED (option b); E13 rust-version pin scoped to publish=false only (file removed per noise-reduction)
 
 Claude verdict ruled every row. E13: `rust-version.workspace` removed from the 8

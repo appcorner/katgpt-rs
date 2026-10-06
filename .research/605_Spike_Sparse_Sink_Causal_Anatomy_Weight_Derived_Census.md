@@ -2,7 +2,7 @@
 
 > **Source:** "The Spike, the Sparse and the Sink: Anatomy of Massive Activations and Attention Sinks" — Shangwen Sun, Alfredo Canziani, Yann LeCun, Jiachen Zhu (NYU). [arXiv:2603.05498](https://arxiv.org/abs/2603.05498), 2026-03-05, ICML 2026.
 > **Date:** 2026-10-05
-> **Status:** Active — **Gain** verdict; two issues filed (katgpt-rs Issue 919 PoC, riir-train Issue 614 recipe levers)
+> **Status:** Adjudicated — katgpt-rs Issue 919 CLOSED 2026-10-07, nothing promoted: census channel key REFUTED (T2 P@4 = 0 both cells); measured-diagonal KV-exemption NO-GO (T3 — QK-norm squashes per-channel scale upstream of the cache, so the 487 Q8KV-gap premise does not apply on QK-normed archs); delimiter-sink folding NO-GO (T4 — pre-RoPE K context-dominated, cos 0.80–0.89 vs the 0.99 bar). Census sidecars remain the T6 merge-drift artifact at riir-train Issue 614 T4. Verdicts + hashes: HISTORY.md (Issue 919). riir-train Issue 614 recipe levers remain open there.
 > **Related Research:** 487 (Massive Activations in HLA — PAS/ISP morphology, sink-position quant prior, Issue 716), 258 (Attention Sink Dual Mechanism NOP/Broadcast, Plan 287), 286 (Attention Drift / depth invariance — magnitude accumulation, Plan 306), 566 (EOT attention priors + sink-margin forecast, Bench 813), 159 (KVarN), 538 (GDN W4A4 quant survival), 200 (quantization outlier collapse), 570 (SAN attention-only FFN deletion — the paper's attention-only ablation is SAN's premise, confirmed at 7B), 095 (MGR multi-gate residuals — "massive activations eliminated", the gating finding's architectural cousin), 531/523 (KV eviction — sink preservation)
 > **Related Plans:** 287 (sink_aware_attn — per-call G3 structural FAIL, cached variant deferred), 306 (depth_invariance diagnostic), 585 (usage-rate KV eviction), 135 (Parallax sigmoid attention — sink-free by construction)
 > **Cross-ref (riir-ai / riir-train):** riir-ai Issue 716 (sink guard, from 487); **riir-train Issue 614** (recipe levers + sink-ratio health metric, this paper); riir-infer quant lanes (EXL3/GDN census consumers)
@@ -98,7 +98,7 @@ No healer surface consumes transformer-internal activation statistics: rust_perf
 | Tier | Criteria | Routing |
 |---|---|---|
 | Super-GOAT | ✗ — the paper is published prior art for its own findings; our extractions are applications, no new capability class | — |
-| GOAT | ✗ (not yet) — census-guided quant + delimiter folding are *hypothesized* gains requiring the Issue-919 PoC (census validation → quant A/B; constancy probe → fold) before any measurable claim | Issue 919 |
+| GOAT | ✗ (CLOSED NEGATIVE 2026-10-07) — the Issue-919 PoC measured both hypothesized gains out: census channel key refuted (P@4 = 0), KV exemption no-go on QK-normed archs, delimiter folding no-go | HISTORY.md (Issue 919) |
 | **Gain** | ✓ — actionable, cheap, modelless extractions on surfaces we own (KV stack, quant lanes, training recipes); densest value is sharpening already-shipped sinks/KV/quant work (487's Q8KV gap, Plan 287's deferred cached variant, ShardKV sink storage) | Research note + 2 issues |
 | Pass | ✗ — clearly actionable | — |
 
@@ -111,6 +111,6 @@ No healer surface consumes transformer-internal activation statistics: rust_perf
 ## 4. Follow-ups
 
 - [x] Research note (this file)
-- [x] katgpt-rs Issue 919 — census (γ-folded + Bonsai scale-aware arm) → validation → quant-policy PoC; delimiter-sink pre-RoPE constancy probe (folding demoted to conditional follow-on)
+- [x] katgpt-rs Issue 919 — census (γ-folded + Bonsai scale-aware arm) → validation → quant-policy PoC; delimiter-sink pre-RoPE constancy probe — **CLOSED 2026-10-07 NEGATIVE on all three hypotheses** (verdicts: HISTORY.md)
 - [x] riir-train Issue 614 — recipe levers + sink-ratio health monitor + wd=0 merge-drift gate (owns the merge gate)
-- [ ] (pending Issue 919) if census passes → quant GOAT plan with feature flag + bench (primary expected value: closes 487's Q8KV per-block-absmax gap); if delimiter constancy passes → folding follow-on; cross-wire Plan 287's cached variant posture
+- [-] (Issue 919 verdict: neither condition passed) quant GOAT plan + folding follow-on NOT filed — census channel key refuted, KV exemption no-go (QK-norm), delimiter constancy missed its bar; Plan 287's cached variant stays unaffected (position-0 folding was already exact-by-construction and cost-free)
