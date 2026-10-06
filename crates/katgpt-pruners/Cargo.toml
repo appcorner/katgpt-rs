@@ -73,6 +73,13 @@ ropd_rubric = ["bandit"]
 subterranean = ["bandit"]
 tes_loop = ["bandit", "katgpt-core/tes_loop"]
 cna_steering = ["bandit"]
+# Bias-space persistent deltas (katgpt-rs Issue 920 T1, HyperThink modelless
+# lane, arXiv:2610.03039): the projection-window sibling of cna_steering —
+# dense signed per-window mean shifts as a frozen constant overlay. Pure math
+# over captured f32 vectors (no dep, no forward code) — the capture/apply
+# seams live in the consuming repos (riir-infer fork, consumer overlays).
+# OPT-IN per the feature-flag discipline; promotion waits on the issue's G2.
+bias_delta = []
 deep_manifold = []
 federation = ["bandit"]
 federation_composer = ["bandit"]
