@@ -31,7 +31,7 @@ Ship the deterministic (modelless) extraction of Spotlight's addressing math: a 
 
 ### Tasks
 
-- [ ] **T2.1** Per-stack ledger entry: retrieval/memory slot — the T1.7 verdict is NOT-PROMOTED-at-10⁶ with the support×capacity law; the ledger entry carries the LAW, not just the verdict (where the consumer's (N, R) fits, the lattice wins its gates); README feature row + `.docs/03_memory/` page.
+- [x] **T2.1** Per-stack ledger entry: retrieval/memory slot — the T1.7 verdict is NOT-PROMOTED-at-10⁶ with the support×capacity law; the ledger entry carries the LAW, not just the verdict (where the consumer's (N, R) fits, the lattice wins its gates); README feature row + `.docs/03_memory/` page. **LANDED 2026-10-07**: `.docs/03_memory/lattice_memory.md` (the class table's fifth row, the law, the Bench 919 gate table, the when-to-reach-for-it envelope) + the `03_memory/README.md` fusion-map node + index row. README feature row pre-existed (T1.1, count-validated).
 - [ ] **T2.2** Consumer wiring (traj/insight evidence memory) is owned by riir-refine Plan 199 Phase 2 — no healer code in this repo; GOAT-gate results cross-referenced there. **Note for the consumer:** the class envelope is (support × capacity)-bounded — at d_k=32, R=0.05σ caps at ~63k items (the traj/insight use case fits comfortably); anything larger needs d_k > 32 (key-projection widening — its own gate, the key stops being the embedding).
 
 ## Guardrails
