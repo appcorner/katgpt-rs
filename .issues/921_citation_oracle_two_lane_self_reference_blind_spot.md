@@ -1,6 +1,10 @@
 # 921 — citation oracle cannot resolve two-lane self-references (riir-infer 9 IN-LOCAL-RANGE rows)
 
-**Status:** OPEN — analysis complete, priced; owner call needed on the instrument arm (the floor re-pin is blocked by the heading-blind rule)
+**Status:** PARTIAL — Option 3 (corpus repair) LANDED 2026-10-07 (riir-infer `71c8eed`; sweep green on riir-infer, ILR 9→0, novel 3→0, pin 0 holds); **Arm B DEFERRED** (design below, `- [-]`); Arm A CLOSED-token variant + Arm C rejected by verdict (round 2)
+
+- [x] Qualify bare `Issue 980` → `riir-ai Issue 980` (riir-infer `f0191e3`)
+- [x] Option 3: rewrite the six self-allocation headings (004–009) into the readable date-led grammar + pin the grammar in riir-infer AGENTS.md (riir-infer `71c8eed`)
+- [-] Arm B — two-lane gap boundary: DEFERRED until the next real touch of this instrument. Design of record: for a repo whose kind dir carries `.highwater_local`, citations in the GAP (`highwater_local` < n < smallest file-backed allocation ABOVE the local counter) classify CROSS/ORPHAN instead of IN-LOCAL-RANGE. Floor derived from git-log file ADDITIONS (the `removed_by_number` record source — NOT the worktree: riir-infer 998/1004 exist only in history), heading-oracle allocations EXCLUDED from the floor (else Arm-A-style additions shrink the gap — order-dependent), the derived floor PRINTED on the per-repo line (or declared in the repo beside `.highwater_local`), contract-name keyed per round-1 Hole 1, `.highwater_local` added to the head-provenance patterns, and a two-sided `--prove-fires` at riir-infer `f0191e3^` (bare `Issue 980` must classify CROSS → riir-ai) vs `f0191e3` (zero).
 
 ## The finding
 
