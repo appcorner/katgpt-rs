@@ -186,6 +186,15 @@ renoise_ce_surprise = ["renoise_ce"]
 # (no-default-consumer rule).
 lthash = []
 
+# lattice_memory (Plan 619, 2026-10-03): LatticeMemory — E2LSH-addressed
+# delta-rule cell lattice (continuous per-axis LSH addressing + 3-tap bump
+# interpolation + flat-slab delta cells; research note 233). The candidate
+# fifth retrieval complexity class beside Raven/Engram/δ-Mem/PKM. Pure stdlib
+# + fastrand (already a dep), wasm32-clean. OPT-IN until the Plan 619 T1.7
+# GOAT gate; consumer = riir-refine Plan 199. NOT analytic_lattice (Plan 330
+# transport operators — unrelated).
+lattice_memory = []
+
 # bf16_simd (Issue 800 Arm A, 2026-09-16): SIMD bf16⇄f32 batch conversion
 # kernels — the widening direction (u16→u32<<16→f32) is lossless; the
 # narrowing ships RNE (bit-exact vs the `half` crate) with truncation as the

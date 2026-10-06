@@ -586,6 +586,13 @@ pub use katgpt_types::simd;
 pub mod speculative;
 pub mod traits;
 
+// Deterministic configuration-seeded draws — the shared LSH seed discipline
+// (the Issue 809 T3 law: same configuration → same projection stream). Moved
+// DOWN from katgpt-pruners/lsh_cache.rs (Plan 619 substrate duty — ships
+// once, here; pruners re-exports). Ungated: local-only compute, the
+// config-audit precedent; lsh_cache (always-on) consumes it unconditionally.
+pub mod lsh_seed;
+
 // Prompt-backend trait — generic prompt→string inference contract (Issue 580).
 // Hoisted from riir-game-sdk::gm::prompt so multiple consumers (riir-agents
 // Phase 2, the SDK's gm::prompt module, future callers) share one trait.
@@ -1526,6 +1533,14 @@ pub use babel_codec::{
 // Opt-in until G1–G6 GOAT gate passes.
 #[cfg(feature = "analytic_lattice")]
 pub mod analytic_lattice;
+
+// LatticeMemory — E2LSH-addressed delta-rule cell lattice (Plan 619, research
+// note 233): continuous per-axis LSH addressing + 3-tap bump interpolation
+// + flat-slab delta cells. The candidate fifth retrieval complexity class.
+// NOT analytic_lattice (Plan 330 transport operators). Opt-in until the
+// Plan 619 T1.7 GOAT gate; consumer = riir-refine Plan 199.
+#[cfg(feature = "lattice_memory")]
+pub mod lattice_memory;
 #[cfg(feature = "analytic_lattice")]
 pub use analytic_lattice::{
     ChainError, ComposerCtx, LatticeVector, PlasmaDraft, RederiveOp, TransportOperator,

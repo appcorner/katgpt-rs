@@ -5406,3 +5406,49 @@ G5 the two-sided leak canary + the fixture-scoped bound. Stays opt-in per
 the no-default-consumer rule — first consumer: riir-reflex Issue 066 (the
 fused-abstain density half); UQ Report-the-Floor rides that consumer's A/B
 (the primitive itself has no outcome space).
+
+## 143. lattice_memory — E2LSH-addressed delta-rule cell lattice (Plan 619 / Research 233)
+
+The candidate FIFTH retrieval complexity class beside Raven O(1) / Engram
+O(1) / δ-Mem O(r) / PKM O(√N): growing state + constant-neighborhood access
++ graded near-miss recall. The deterministic, modelless extraction of the
+Spotlight-class addressing math (Percepta blog 2026-10-02; published
+lineage SDM arXiv:2607.07386, MARCH arXiv:2608.12435, Memory Layers
+arXiv:2412.09764 — our form is closed-form delta rule, no gradient descent).
+
+- **`LshAxes`** — continuous E2LSH per-axis addressing: `(a·x + b)/w` with a
+  seeded p-stable (Gaussian) direction and uniform offset per axis; the
+  integer part is the cell coordinate, the FRACTIONAL part is the bump
+  input (the property the rejected integer-split SimHash form could not
+  give). Seeds ride the shared `katgpt_core::lsh_seed::config_seed`
+  discipline (moved DOWN from `katgpt-pruners/lsh_cache.rs`, which now
+  re-exports it — the Issue 809 same-config-same-projection law, one copy).
+- **`bump`** — 3-tap per-axis LUT (2⁸) over the fractional coordinate:
+  radius-1.5 tent centered at the query over `{round(c)−1, round(c),
+  round(c)+1}`, normalized to a per-axis partition of unity;
+  direction-sensitive; the far tap decays to zero exactly at the ±0.5
+  boundary (support exactly ±1 cell). LUT-vs-direct parity ≤ 1e-6 gated.
+- **`LatticeMemory`** — the 2D lattice over a preallocated flat slab with
+  runtime `d_k`/`d_v` (the const-generic shape needs `generic_const_exprs`,
+  unstable on the pinned toolchain): cells claim slab regions on first
+  write (`LatticeCell { offset, len, writes }`), never per-cell heap;
+  reads are φ-blended read-then-blend into a caller buffer, φ normalized
+  over the IN-GRID geometric support (sparsity attenuates — graded recall,
+  never a written-mass renorm, which would read a flat 1.0 and be a wider
+  cliff than Engram's).
+- **Measured at birth (Plan 619 T1.2's gates)**: locality ≥ 95% same/
+  adjacent-cell under small perturbation across seeds (the plan's STOP
+  gate — cleared); fractional-part distribution non-degenerate (16-bin
+  spread); near-miss recovery through neighbor weight, strictly graded
+  (positive past the boundary, decaying with distance — no cliff).
+- **Status: Phase 1 in progress** — T1.4 (the delta-rule write
+  `S ← S(I−βkkᵀ)+βkvᵀ` + forgetting/interference/alloc gates), T1.5 (the
+  CDF-corrected grid sizer), T1.6 (sigmoid-only scoring), T1.7 (the GOAT
+  bench vs PKM/Engram at our key distributions) and T1.8 (cos²-vs-tent
+  kernel A/B) remain; consumer = riir-refine Plan 199. No GOAT claim until
+  T1.7 runs.
+
+Substrate: `crates/katgpt-core/src/lattice_memory/` (`types.rs` vocabulary,
+`address.rs` E2LSH, `bump.rs` the 3-tap LUT) + `crates/katgpt-core/src/
+lsh_seed.rs` (the shared seed discipline). Pure stdlib + fastrand,
+wasm32-clean; zero new deps.
