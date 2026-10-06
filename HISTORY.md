@@ -254,7 +254,7 @@ HEAD^1^{tree}`).
 T1 `65b199b0` + T2 `67884461` in `katgpt-canon`; G5 (riir-train Bench 605) PRIMARY
 +0.50..0.55 but the fit-time shuffle null alone gives +0.41..0.44 — no attributable
 rung. Control failing = instrument broken, never claim closed (the Issue-825
-clause); reopen paths in Bench 605 §Verdict(6).
+clause); reopen paths in riir-train Bench 605 §Verdict(6).
 
 ## 2026-09-23 — Issue 875 T3 CLOSED (+ the issue): time-annealed sampling ranges + the closed-form truncation predicate (Bench 883)
 
