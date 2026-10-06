@@ -77,7 +77,7 @@ mod looping;
 mod lora;
 pub mod math;
 pub mod merkle;
-mod rng;
+pub mod rng;
 mod sense;
 /// SIMD-accelerated linear algebra kernels (NEON / AVX2 / WASM-SIMD128 /
 /// scalar fallback). Co-located with `types` because `types::math` calls
@@ -156,7 +156,7 @@ pub use merkle::{
     HASH_SIZE, MERKLE_OCTREE_BRANCHING, MERKLE_OCTREE_DEPTH, MERKLE_OCTREE_INTERNAL,
     MERKLE_OCTREE_LEAVES, MERKLE_OCTREE_NODES, MerkleOctree, MerkleProof,
 };
-pub use rng::Rng;
+pub use rng::{Rng, SPLITMIX64_GAMMA, SplitMix64, splitmix64_finalize};
 #[allow(deprecated)]
 pub use sense::ShardEmbedding;
 pub use sense::{DilationConfig, SenseKind, SenseModule, TernaryDir};
