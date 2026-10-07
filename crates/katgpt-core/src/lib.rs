@@ -3508,6 +3508,21 @@ pub mod pool_admission;
 #[cfg(feature = "rate_control")]
 pub mod rate_control;
 
+// escalation_guard — the shared serving-escalation guard primitives
+// (Issue 923 / riir-refine Plan 202 R1): extracted ONCE from riir-rethink's
+// ESC lane so every escalation lane in the stack consumes ONE definition —
+// RollingRateLatch (rolling N-decision window over escalation flags, rate()
+// None until full, sticky latched demotion, O(1) alloc-free observe;
+// both-bounds and cost-ceiling-only shapes), the exact-literal demote-only
+// kill-switch decode (absence-armed; ONLY "0" demotes — the manifest-only
+// arming law; tpr::parse_kill is the same truth table at inverted polarity,
+// cross-pinned by tests), and the namespace-parameterized receipt tiers
+// (ESC:think|cheap|demoted — rethink's bytes reproduced exactly). Sibling
+// vocabulary for greps: EscRateGuard, kill_switch_decode,
+// RATE_GUARD_WINDOW, ESC_POSTURES. OPT-IN (`escalation_guard`).
+#[cfg(feature = "escalation_guard")]
+pub mod escalation_guard;
+
 // lthash — incremental homomorphic multiset hash (Issue 807): LtHash
 // [u16; N] (default 1024 lanes, wrapping add mod 2^16) with insert=add,
 // remove=subtract, merge=sum, checksum=BLAKE3(state). Order-independent

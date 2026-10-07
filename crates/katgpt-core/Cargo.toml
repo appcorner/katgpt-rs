@@ -305,6 +305,32 @@ differential_kv_eviction = ["kv_sink_window"]
 # consumer GOAT.
 rate_control = []
 
+# escalation_guard (Issue 923, 2026-10-07 / riir-refine Plan 202 R1): the
+# shared serving-escalation guard primitives, extracted ONCE from
+# riir-rethink's ESC lane (EscRateGuard / kill_switch_decode / the
+# ESC:think|cheap|demoted receipt tiers) so every escalation lane in the
+# stack consumes ONE definition — the exact-literal kill-switch decode
+# existed as THREE private spellings (rethink's public one + tpr::parse_kill
+# + ugc_schedule's UGC_DEBUG pattern-copy; the tpr/ugc copies stay, both
+# default-on surfaces an opt-in feature cannot serve — truth tables
+# cross-pinned by tests instead). THREE pieces: RollingRateLatch (rolling
+# N=200-decision window, rate() None until full — a partial window is no
+# measurement — sticky latched demotion rate_above_max/rate_below_min, O(1)
+# alloc-free observe; TWO shapes: both-bounds 0<min<max<1 and
+# cost-ceiling-only max_rate for lanes whose escalation rate IS the miss
+# rate, low = good, rate_below_min nonexistent), demote_only_decode
+# (absence-armed, ONLY the exact literal "0" demotes — manifest-only
+# arming law) + the uncached env helper, and the namespace-parameterized
+# receipt formatters (ns="ESC" reproduces rethink's bytes exactly —
+# migration is a pure move). Mechanism-distinct from rate_control (a
+# dual-EWLS effect-size CONTROLLER on a noisy scalar — this is a binary
+# escalation-flag window latch). Consumers land separately (refine's
+# Plan-202 R1 manifest half; the instinct/rethink migration). Pure std,
+# zero deps, zero unsafe, wasm32-clean. OPT-IN (own GOAT: bench_923 G2
+# ns/observe + G4 zero-alloc observe; promotion needs a consumer-measured
+# gain).
+escalation_guard = []
+
 # jsd_topk (Issue 802 item 2, 2026-09-16): NaN-safe bounded top-K Jensen–
 # Shannon divergence kernel — JSD = H(M) − ½H(P) − ½H(Q) over renormalized
 # top-K slices; disjoint supports → EXACTLY ln 2 (never the KL +∞/NaN trap
@@ -4189,6 +4215,14 @@ required-features = ["compression_drafter"]
 name = "bench_875_rate_control_goat"
 harness = false
 required-features = ["rate_control"]
+
+# Issue 923 — the escalation_guard GOAT gate (G2 ns/observe; G1 is the
+# in-module #[cfg(test)] suite, run via the katgpt-core:<n>:escalation_guard
+# test-gate row; G4 is the in-module TrackingAllocator suite).
+[[bench]]
+name = "bench_923_escalation_guard_goat"
+harness = false
+required-features = ["escalation_guard"]
 
 # Plan 607 T1 — state_option_scoring GOAT gate (G1 planted-correctness + the
 # reflex discrimination/constant-pick floors, G2 p99-per-decision-SET with
