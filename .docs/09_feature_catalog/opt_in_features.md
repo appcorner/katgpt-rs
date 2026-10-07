@@ -5357,9 +5357,21 @@ parallel commit under a factorized proposal.
   every family; at equal validity 5–19% fewer NFE than the τ = 0.9 incumbent
   given a singleton floor (shipped D2F τ has none and stalls on a flat
   canvas); the bound costs 16× NFE on genuinely independent positions.
-- Promotion pending Issue 917 T2/T3: the A/B against the incumbent commit
-  policy on the D2F τ_conf, DDTree width-k and DFlash block-commit lanes
-  (G2 NFE at matched quality, G3 no quality regression).
+- **T3 lane wiring LANDED 2026-10-07** (opt-in, same feature forwards to
+  `katgpt-speculative`): `build_dd_tree_eb{,_into}` (per-expansion child
+  count = the EB prefix over candidate children's surprisal −ln p; best-first
+  order preserved) + `dflash_block_commit_eb{,_with}` / `dflash_predict_eb_with`
+  (EB prefix over per-depth `position_stats`, argmax tokens only, ascending
+  depth order); `EbBuildScratch`/`EbCommitScratch` zero-alloc with commit-count
+  counters + histogram; legacy paths untouched and bit-identical with the flag
+  off. Counts bench `bench_917_eb_lane_wiring`: EB(γ=5, cap=8) commits mean
+  2.00/expansion on FLAT rows vs 4.00 on PEAKED (any fixed-k is constant);
+  γ ≤ 0.3 rides the safe fixed-k=1 end. 12 lane tests + G4 alloc check +
+  brute-force Σ−max agreement (500 seeded cases × 3 proxies). Re-exported at
+  `katgpt_rs::speculative::entropy_bounded`.
+- Promotion pending Issue 917 T2 + the lane G2/G3: the D2F τ_conf A/B stays
+  blocked on the trained checkpoint (riir-train Plan 437, owner-gated 4090
+  windows); the γ dial is uncalibrated until that lane A/B runs.
 
 ## 142. gmm_support — Density-Ratio Support Gate (Plan 618 / Research 604, arXiv:2610.02126)
 
