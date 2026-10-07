@@ -2,6 +2,45 @@ Compacted 2026-10-06: every `##` heading kept verbatim, one compact entry per
 record (≤2 short lines); the full pre-compaction text is in git history.
 Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## Issue 924 (2026-10-07 → closed 2026-10-07) — citation_weight's dialects are case-sensitive; lowercase `plan N` prose is invisible to duplicate adjudication: CLOSED — both instruments repaired, oracle confirmed (file removed per noise-reduction)
+
+Landed `b98c340dc`: `citation_re()` scopes `(?i:…)` over long-form prefixes
+(bare letters stay uppercase — lowercase `p<NNN>`/`b<NNN>` measured as
+identifier noise, 68/80 sites in riir-ai); measured counts recorded in the
+DIALECTS comment (seal-game-editor lowercase-DOMINANT: `plan` 1,119 vs 591,
+issue 719 vs 228; riir-ai 406/340; katgpt-rs 224/146). Family sweep:
+`issue_citation_gate.py` carried the same class — `_HEAD`/`_HEAD_1D`/`_TAIL_1D`
++ the trail re-search got the same scoped `(?i:)`, `citations()` normalizes to
+the canonical KIND (scanned 475→476: the previously-invisible `issue 739` in
+AGENTS.md); `numbering_drift_sweep` (no dialect regex) and `citation_drift_sweep`
+(by-name stems) adjudicated NOT the class; 163 lowercase heads across sibling
+AGENTS/HISTORY docs reported, none gated (this gate scans its own repo's pinned
+docs). riir-kat HISTORY: three unpadded single-digit citations re-spelled
+`issue 003` (width-bound readability, that
+file's own zero-pad convention). Oracle re-run: sge 241 sites 4→15 (verdict
+WEAK → `241_glb_delivery_lane` +5 over 9 decided), 272 3→12; all 4 hand-read
+lowercase sites visible + attributable, PLUS ~10 `.rs`-comment sites the
+hand-read's `.md`-only pass missed (`tools/neuron-publish/src/*`, `regate.py`).
+Validation: citation_weight + gate selftests PASS, numbering_gate PASS,
+numbering_drift_sweep PASS, docs_gate 35/35 (86.3s wall).
+
+## Issue 923 (2026-10-07 → closed 2026-10-07) — escalation_guard, the shared serving-escalation guard primitive (riir-refine Plan 202 R1): CLOSED — all tasks landed, cross-recorded (file removed per noise-reduction)
+
+Landed `6118539c7`: katgpt-core `escalation_guard` (opt-in) — `RollingRateLatch`
+(both-bounds + cost-ceiling-only shapes, rate() None until full, sticky demotion,
+O(1) alloc-free observe), `demote_only_decode` + env helper, ns-parameterized
+receipt tiers (`ns="ESC"` reproduces rethink's bytes exactly),
+`rate_bounds_valid`. GOAT (Bench 923): G1 17 tests, G2 1.74 ns/observe
+(ceiling 20), G3 default surface unchanged (2141 default lib count), G4
+0 allocs/1000 observes. Test-gate row `katgpt-core:2158:escalation_guard`.
+Consumer halves cross-recorded in riir-refine Plan 202 R1 (refine manifest half
++ instinct consumption `9e1fc37` — `EscalateSpec::validate` consumes the ONE
+`rate_bounds_valid` definition). The tpr/ugc private kill-switch copies STAY
+(default-on surfaces an opt-in feature cannot serve; truth tables cross-pinned
+both sides). Remaining follow-up lives in riir-refine Plan 202 R1's
+"Remaining" block: rethink's migration onto the shared latch via instinct's
+pub surface — deliberately its own unit.
+
 ## Issue 921 (2026-10-07 → closed 2026-10-07) — citation oracle two-lane self-reference blind spot: CLOSED — Arm B landed, corpus repaired, sweep green (file removed per noise-reduction)
 
 riir-infer's nine IN-LOCAL-RANGE rows were narrated-only local-lane numbers
