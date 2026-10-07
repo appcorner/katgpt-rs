@@ -2,7 +2,7 @@
 
 > **Status:** Active — Phase 1 not started (filed 2026-10-07, post Claude-verdict AGREE; Research 607)
 > **Source:** Research 607 (OSDI'24 Rebalancer, facebook/rebalancer @ e4c35517980d893849275f71b3cb90f81164b6d5)
-> **Consumers:** riir-chain Issue 164 (primary — shard_assignment solver); riir-rethink Issue 029 (candidate)
+> **Consumers:** riir-chain Issue 164 (primary — shard_assignment solver); riir-rethink Issue 029 (candidate; closed 2026-10-07 — record: riir-rethink HISTORY.md, the promote triggers folded there)
 
 ## Phase 1 — the crate + core solver (this plan's whole scope)
 

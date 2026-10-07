@@ -5,7 +5,7 @@
 > **Status:** Active — GOAT verdict; Plan 620 filed (katgpt-assign Phase 1); consumers filed (riir-chain primary, riir-rethink candidate)
 > **Related Research:** 455-lineage (quantile_balance_router — the continuous cousin), 008 (questbench "CSP" — entropy scoring, not a solver)
 > **Related Plans:** 620 (rebalancer_assignment_solver — filed this session); 455 (QB router, shipped default-on); 440 (LACAM/PIBT MAPF, opt-in); 271 (head_budget solver)
-> **Cross-ref (riir-chain / riir-rethink):** riir-chain Issue 164 (primary consumer: `shard_assignment.rs`); riir-rethink Issue 029 (candidate tracker)
+> **Cross-ref (riir-chain / riir-rethink):** riir-chain Issue 164 (primary consumer: `shard_assignment.rs`); riir-rethink Issue 029 (candidate tracker; closed 2026-10-07 — record: riir-rethink HISTORY.md)
 > **Classification:** Public
 
 ---
