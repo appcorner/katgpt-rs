@@ -156,6 +156,7 @@ katgpt-core:2085:state_option_scoring
 katgpt-core:2074:template_decode
 katgpt-core:2158:escalation_guard
 katgpt-dec:249:pca_global
+katgpt-dec:257:loop_straightness
 katgpt-types:139
 "
 

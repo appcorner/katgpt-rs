@@ -2,6 +2,23 @@ Compacted 2026-10-06: every `##` heading kept verbatim, one compact entry per
 record (≤2 short lines); the full pre-compaction text is in git history.
 Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## Issue 922 (2026-10-07 → closed 2026-10-07) — loop-straightness monitor family, the DEC-native stalemate signal (LiFT modelless residue): CLOSED — primitive half landed, GOAT ALL PASS (file removed per noise-reduction)
+
+Landed same-day: katgpt-dec `loop_straightness` (opt-in; katgpt-core + root
+forwards) — `path_action` (Σ‖Δ_k‖²/δ_k, chord², Σδ in one pass) +
+`action_efficiency` (η = chord²/(Σ·Σδ) ∈ (0,1]; 1 iff straight at constant
+grid-speed, 1−η the exact wasted-motion fraction). Signal-diff executed
+pre-implementation: all four named cousins are counters/entropy/classifiers,
+none geometric — recorded in the module doc + Bench 922. GOAT (Bench 922):
+G1 8 tests — the 500-walk nonuniform-grid floor sweep caught the landing's
+OWN formula bug (first cut multiplied by Σδ, η=1.38 > 1; uniform fixtures
+mask that class — recorded as the lesson); G2 38.7 ns @ K=8 dim=4, 26× under
+bar, K=64 dim=32 disclosed 1,137 ns / 29.4× scaling; G3 clippy both postures
+(denied `needless_range_loop` + `redundant_slicing` caught pre-landing);
+G4 0 allocs/1000. Row `katgpt-dec:257:loop_straightness`; counts 674→675;
+count_features green (675=675). Consumer half = riir-ai Issue 1037 (each
+row owes its own signal-diff); promotion waits on a production consumer.
+
 ## Issue 924 (2026-10-07 → closed 2026-10-07) — citation_weight's dialects are case-sensitive; lowercase `plan N` prose is invisible to duplicate adjudication: CLOSED — both instruments repaired, oracle confirmed (file removed per noise-reduction)
 
 Landed `b98c340dc`: `citation_re()` scopes `(?i:…)` over long-form prefixes
