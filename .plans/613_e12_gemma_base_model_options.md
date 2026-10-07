@@ -53,5 +53,5 @@ there).
 
 ## Verdict row (owner fills one line)
 
-- [ ] **(a)** accept + provision — date: ______ , token location: box env only
+- [-] **(a)** accept + provision — date: ______ , token location: box env only **(owner act — provision pending; (b) retired 2026-10-05)**
 - [x] **(b)** retire the check as permanently blocked — date: 2026-10-05 (delegated owner verdict)
