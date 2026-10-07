@@ -1,6 +1,6 @@
 # Issue 920: HyperThink modelless delta-overlay PoC (defend-wrong, pre-registered against the §31 failure class)
 
-**Status:** Open — T1 capture running (full 2,000-probe sweep in flight; machinery validated on the 8-probe pilot)
+**Status:** Open — T1 capture DEFERRED to the M5 box (2026-10-07: M3 measured ~36 s/probe ≈ 20 h projected, killed at probe ~425/2000; partial .raw discarded — the run is deterministic, it restarts from scratch there; the fixture gate is committed skip-loud until the sidecar lands)
 **Date:** 2026-10-06
 **Research:** [katgpt-rs/.research/606_HyperThink_Text_to_Parameter_VQ_Bias_Amortization.md](../.research/606_HyperThink_Text_to_Parameter_VQ_Bias_Amortization.md)
 **Source:** arXiv:2610.03039 (HyperThink, COLM 2026) — modelless track only
