@@ -1,6 +1,6 @@
 # Bench 924 — katgpt-assign G2 outside baselines (Plan 620 Phase 1)
 
-> **Status:** COMPLETE — G2 PASS (quality axis); wall-time PROVISIONAL (loaded box, preflight refused — see provenance)
+> **Status:** COMPLETE — G2 PASS (quality axis); wall time recorded under PASSED preflight
 > **Feature posture:** `assignment` — **OPT-IN** (katgpt-core + katgpt-rs root forwards; not in any default set)
 > **Plan:** [`.plans/620_rebalancer_assignment_solver.md`](../.plans/620_rebalancer_assignment_solver.md) · **Research:** [`.research/607_Rebalancer_Assignment_Solver.md`](../.research/607_Rebalancer_Assignment_Solver.md)
 > **Run:** `cargo run --release -p katgpt-assign --bench bench_924_assignment_g2_baselines` (harness = false, zero-dep bench)
@@ -81,35 +81,39 @@ the partition-closure tail: Phase 2's triple moves close it).
   under the counting allocator (`src/alloc.rs`, debug + `alloc_tracking`
   postures — the Issue-741 profile-free form).
 
-## Wall time — PROVISIONAL (loaded box)
+## Wall time
 
-**Preflight REFUSED** at measurement time — the repo's latency-claim rule
-forbids publishing wall-time numbers from this box state; the table below is
-the loaded-box run, kept for scale-ordering only (NOT a latency claim; the
-clean re-measurement lands on the next quiet-box window):
+**Preflight PASSED** for the recorded run:
 
 ```
-PROVENANCE: power=AC Power load=6.83 swap=6164.88M canary=skipped powermode=2(high)
-✗ preflight REFUSED — do not publish a latency number from this box now
+PROVENANCE: power=AC Power load=4.63 swap=6164.88M canary=skipped powermode=2(high)
+✓ preflight PASSED — quote the PROVENANCE line in the bench record
 ```
 
-| fixture | local wall_ms (loaded, provisional) |
-|---|---:|
-| balance_5c_b20 | 34 |
-| balance_20c_b12 | 12 |
-| rand_200x10 | 2,490 |
-| rand_1000x20 | 2,838 |
-| rand_5000x50 | 4,314 |
-| rand_20000x100 | 7,481 |
-| rand_20000x200_4d | 24,679 |
-| repair_10c_L1000_e50 | 0.18 |
-| shard_256x8 | 3,379 |
-| shard_1024x16 | 8,256 |
+(An earlier run under sibling load 6.8–7.7 produced byte-identical QUALITY
+numbers — an unplanned cross-load determinism check — and wall times within
+3% of the quiet run: the 10M evaluation cap binds, not box speed.)
 
-Scale reading (provisional): ~400k evaluations/s under load with the default
-(single-threaded, deterministic) configuration; the 10M-eval cap binds the
-large fixtures, so wall time tracks the eval budget, not instance difficulty.
-FFD construction is 0.01–7 ms (it is a single pass, no search).
+| fixture | local wall_ms | evals | evals/s |
+|---|---:|---:|---:|
+| balance_5c_b20 | 34 | 228,195 | ~6.7M/s |
+| balance_20c_b12 | 12 | 60,830 | ~4.9M/s |
+| rand_200x10 | 2,503 | 10,000,384 | ~4.0M/s |
+| rand_1000x20 | 2,833 | 10,000,384 | ~3.5M/s |
+| rand_5000x50 | 4,300 | 10,000,384 | ~2.3M/s |
+| rand_20000x100 | 7,278 | 10,000,384 | ~1.4M/s |
+| rand_20000x200_4d | 24,316 | 10,000,384 | ~0.4M/s |
+| repair_10c_L1000_e50 | 0.17 | 1,121 | ~6.6M/s |
+| shard_256x8 | 3,438 | 8,442,306 | ~2.5M/s |
+| shard_1024x16 | 8,412 | 10,000,384 | ~1.2M/s |
+
+Reading: single-threaded deterministic search at 0.4–6.7M evaluations/s;
+~85–200 ns per delta evaluation depending on DAG size. The 10M-eval cap
+binds the large fixtures, so wall time tracks the eval budget — an operator
+rebalance window of seconds at 20k shards, against Meta's p99 16s at
+65k×5k (our envelope is orders smaller). FFD construction is 0.01–6 ms
+(single pass, no search). For the Glacial-class topology cadence this is
+compute-trivial; the movement-minimality (53/256 relocation) is the value.
 
 ## Deviations from the plan letter (recorded)
 
