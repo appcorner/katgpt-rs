@@ -13,7 +13,9 @@
 //! `S ← (I − βkkᵀ)S + βkvᵀ` (rank-1 removal along the key + rank-1 add, two
 //! `d_k·d_v` MAC passes, no gradient descent) and the per-cell
 //! read-then-blend read `Σ φ_c·(S_cᵀ q)`. T1.5 adds the occupancy-warped
-//! sizer (`sizer` + `cdf`); T1.6 the sigmoid-only scoring read.
+//! sizer (`sizer` + `cdf`); T1.6 the sigmoid-only scoring read. T1.9 arms
+//! freeze/thaw — `snapshot`/`restore`/`commitment`, the Plan 199 T1.B
+//! consumer surface (BLAKE3-committed artifact; whole-swap thaw).
 //!
 //! Opt-in (`feature = "lattice_memory"`) until the Plan 619 GOAT gate
 //! (T1.7) passes; the gate designs live in the plan, never here. Name
@@ -29,7 +31,10 @@ pub use address::{split_coordinate, LshAxes, AXES};
 pub use bump::{axis_weights, axis_weights_cos2, build_lut, weights_direct, AxisWeights, BumpLut};
 pub use cdf::CdfWarp;
 pub use sizer::{capacity_per_cell, support_radius};
-pub use types::{validate, BumpKernel, LatticeCell, LatticeConfig, LatticeConfigError};
+pub use types::{
+    validate, BumpKernel, LatticeCell, LatticeConfig, LatticeConfigError, LatticeSnapshot,
+    LatticeSnapshotError,
+};
 
 /// The 3×3 neighborhood weight row for one axis: `[prev, center, next]`.
 const TAPS: usize = 3;
@@ -110,6 +115,14 @@ impl LatticeMemory {
     #[must_use]
     pub fn written_cells(&self) -> usize {
         self.cursor.checked_div(self.config.cell_len()).unwrap_or(0)
+    }
+
+    /// Slab elements claimed so far — bytes/4 is the evidence store's
+    /// consumed size (consumer growth telemetry; also the exact value
+    /// [`Self::snapshot`] freezes into [`LatticeSnapshot::cursor`]).
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
     }
 
     /// The clamped primary cell `(row, col)` a query addresses — the
@@ -278,6 +291,97 @@ impl LatticeMemory {
         assert!(lambda > 0.0 && lambda.is_finite(), "lambda must be finite > 0");
         let wf = self.read_impl(x, Query::Dense(q), out);
         crate::sigmoid(lambda * (2.0 * wf - 1.0))
+    }
+
+    /// Serializable state snapshot — the freeze half of the Plan 199 T1.B
+    /// consumer surface. Pairs with [`Self::commitment`]: the artifact and
+    /// its BLAKE3 digest travel together, and [`Self::restore`] is the thaw
+    /// (whole-artifact swap semantics — never a blend with current state).
+    ///
+    /// Batch-path by design: this clones the cell table and the slab, which
+    /// is exactly what a freeze is. The G4 zero-alloc law covers the hot
+    /// write/read path only, and this is neither.
+    #[must_use]
+    pub fn snapshot(&self) -> LatticeSnapshot {
+        LatticeSnapshot { cells: self.cells.clone(), slab: self.slab.clone(), cursor: self.cursor }
+    }
+
+    /// Thaw: replace the current state with a snapshot taken from a lattice
+    /// of the SAME geometry (built from the same `LatticeConfig`). After a
+    /// successful restore, reads are bitwise what the source lattice's reads
+    /// were at snapshot time, and later writes continue from the snapshot's
+    /// slab cursor.
+    ///
+    /// # Errors
+    /// [`LatticeSnapshotError::GeometryMismatch`] when the snapshot came
+    /// from a differently-shaped lattice;
+    /// [`LatticeSnapshotError::CursorOutOfBounds`] or
+    /// [`LatticeSnapshotError::CellOutOfBounds`] when the snapshot is
+    /// corrupt — refused here so a thawed lie can never reach the hot path's
+    /// slab indexing.
+    pub fn restore(&mut self, snapshot: &LatticeSnapshot) -> Result<(), LatticeSnapshotError> {
+        if snapshot.cells.len() != self.cells.len() || snapshot.slab.len() != self.slab.len() {
+            return Err(LatticeSnapshotError::GeometryMismatch {
+                expected_cells: self.cells.len(),
+                found_cells: snapshot.cells.len(),
+                expected_slab: self.slab.len(),
+                found_slab: snapshot.slab.len(),
+            });
+        }
+        if snapshot.cursor > snapshot.slab.len() {
+            return Err(LatticeSnapshotError::CursorOutOfBounds {
+                cursor: snapshot.cursor,
+                slab_len: snapshot.slab.len(),
+            });
+        }
+        let slab_len = snapshot.slab.len();
+        for (idx, cell) in snapshot.cells.iter().enumerate() {
+            let end = u64::from(cell.offset) + u64::from(cell.len);
+            if end > slab_len as u64 {
+                return Err(LatticeSnapshotError::CellOutOfBounds {
+                    cell_index: idx,
+                    offset: cell.offset,
+                    len: cell.len,
+                    slab_len,
+                });
+            }
+        }
+        self.cells.clone_from(&snapshot.cells);
+        self.slab.clone_from(&snapshot.slab);
+        self.cursor = snapshot.cursor;
+        Ok(())
+    }
+
+    /// BLAKE3 commitment over the full state: a geometry header (grid,
+    /// `d_k`, `d_v`, lengths, cursor), the cell table, then every slab
+    /// element — all little-endian, so commitments are comparable across
+    /// machines. Byte-identical state commits identically; any written byte
+    /// moves the commitment.
+    #[must_use]
+    pub fn commitment(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.config.grid[0].to_le_bytes());
+        hasher.update(&self.config.grid[1].to_le_bytes());
+        hasher.update(&(self.config.d_k as u64).to_le_bytes());
+        hasher.update(&(self.config.d_v as u64).to_le_bytes());
+        hasher.update(&(self.cells.len() as u64).to_le_bytes());
+        hasher.update(&(self.slab.len() as u64).to_le_bytes());
+        hasher.update(&(self.cursor as u64).to_le_bytes());
+        for cell in &self.cells {
+            hasher.update(&cell.offset.to_le_bytes());
+            hasher.update(&cell.len.to_le_bytes());
+            hasher.update(&cell.writes.to_le_bytes());
+        }
+        // 64 KiB of f32 per update — no slab-sized copy, no per-element call.
+        let mut buf = [0u8; 4 * 16_384];
+        for chunk in self.slab.chunks(16_384) {
+            let (buf_rows, _) = buf.as_chunks_mut::<4>();
+            for (dst, src) in buf_rows.iter_mut().zip(chunk.iter()) {
+                dst.copy_from_slice(&src.to_le_bytes());
+            }
+            hasher.update(&buf[..chunk.len() * 4]);
+        }
+        *hasher.finalize().as_bytes()
     }
 
     /// The shared read body — blends the neighborhood into `out` and returns

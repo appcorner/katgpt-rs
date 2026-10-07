@@ -1,4 +1,6 @@
-//! Plan 619 T1.4/T1.6 gates — the LatticeMemory hot-path allocation ceiling.
+//! Plan 619 T1.4/T1.6 gates — the LatticeMemory hot-path allocation ceiling
+//! — plus the T1.9 freeze/thaw gates (snapshot/restore/commitment, the Plan
+//! 199 T1.B consumer surface).
 //!
 //! The G4 law: after construction, every write/read/score is heap-free (the
 //! slab, the cell table and the delta-rule scratch are allocated once in
@@ -25,7 +27,9 @@
 static GATE_ALLOC: katgpt_core::alloc::TrackingAllocator =
     katgpt_core::alloc::TrackingAllocator;
 
-use katgpt_core::lattice_memory::{BumpKernel, LatticeConfig, LatticeMemory};
+use katgpt_core::lattice_memory::{
+    BumpKernel, LatticeCell, LatticeConfig, LatticeMemory, LatticeSnapshot, LatticeSnapshotError,
+};
 
 fn config() -> LatticeConfig {
     LatticeConfig {
@@ -115,4 +119,139 @@ fn sized_constructor_reports_but_hot_path_stays_clean() {
     }
     let (count, _) = katgpt_core::alloc::get_alloc_stats();
     assert_eq!(count, 0, "sized-lattice hot path allocated {count} times");
+}
+
+// ── T1.9 — freeze/thaw (Plan 199 T1.B consumer surface) ───────────────
+
+#[test]
+fn snapshot_roundtrip_restores_exact_state() {
+    let mut lat = LatticeMemory::new(config()).unwrap();
+    let k = [0.5_f32; 4];
+    let xa = [0.35_f32; 16];
+    let xb =
+        [0.9_f32, 0.1, 0.0, 0.8, 0.2, 0.0, 0.7, 0.3, 0.0, 0.6, 0.4, 0.0, 0.5, 0.5, 0.0, 0.4];
+    lat.write_delta(&xa, &k, &[1.0, 0.0, 0.0, 0.0], 1.0);
+    lat.write_delta(&xb, &k, &[0.0, 1.0, 0.0, 0.0], 0.5);
+    lat.write_value(&xa, &[2.0, 0.0, 0.0, 0.0]);
+    let mut blend_a = [0.0_f32; 4];
+    let mut cells_b = [0.0_f32; 4];
+    lat.read_blend(&xa, &mut blend_a);
+    lat.read_cells(&xb, &k, &mut cells_b);
+    let written_at_snap = lat.written_cells();
+    let cursor_at_snap = lat.cursor();
+
+    let snap = lat.snapshot();
+
+    // Mutate past the snapshot; the thaw must undo it exactly.
+    lat.write_delta(&xb, &k, &[0.0, 0.0, 1.0, 0.0], 1.0);
+
+    // The artifact survives a serde round trip untouched.
+    let bytes = serde_json::to_vec(&snap).expect("serialize snapshot");
+    let thawed: LatticeSnapshot = serde_json::from_slice(&bytes).expect("deserialize snapshot");
+    assert_eq!(snap.cells, thawed.cells, "serde round trip altered the cell table");
+    assert_eq!(snap.slab, thawed.slab, "serde round trip altered the slab");
+
+    lat.restore(&thawed).expect("restore");
+    let mut blend_after = [0.0_f32; 4];
+    let mut cells_after = [0.0_f32; 4];
+    lat.read_blend(&xa, &mut blend_after);
+    lat.read_cells(&xb, &k, &mut cells_after);
+    assert_eq!(blend_a, blend_after, "blend must be bitwise identical after thaw");
+    assert_eq!(cells_b, cells_after, "cell read must be bitwise identical after thaw");
+    assert_eq!(lat.written_cells(), written_at_snap);
+    assert_eq!(lat.cursor(), cursor_at_snap, "thaw must restore the slab cursor exactly");
+
+    // Writes continue from the restored cursor: a post-thaw write to a
+    // FRESH cell (not one of the two already-written primaries) claims slab
+    // from exactly where the snapshot froze it.
+    let pa = lat.primary_cell(&xa);
+    let pb = lat.primary_cell(&xb);
+    let mut fresh = None;
+    for t in 1..64_u32 {
+        let mut cand = [0.0_f32; 16];
+        cand[0] = t as f32 * 0.13;
+        cand[1] = 0.7;
+        cand[2] = -0.4;
+        let pc = lat.primary_cell(&cand);
+        if pc != pa && pc != pb {
+            fresh = Some(cand);
+            break;
+        }
+    }
+    let xc = fresh.expect("no fresh primary cell in 64 probes");
+    lat.write_delta(&xc, &k, &[0.0, 0.0, 0.0, 1.0], 1.0);
+    assert_eq!(lat.written_cells(), written_at_snap + 1, "fresh cell not claimed post-thaw");
+    assert!(lat.cursor() > cursor_at_snap, "cursor did not continue past thaw");
+}
+
+#[test]
+fn commitment_binds_content_and_geometry() {
+    let build = || {
+        let mut lat = LatticeMemory::new(config()).unwrap();
+        lat.write_delta(&[0.35_f32; 16], &[0.5_f32; 4], &[1.0, 0.0, 0.0, 0.0], 1.0);
+        lat
+    };
+    let a = build();
+    let b = build();
+    assert_eq!(a.commitment(), b.commitment(), "identical state must commit identically");
+
+    // Empty lattices of different geometry never share a commitment (the
+    // geometry header), even before any write.
+    let empty_a = LatticeMemory::new(config()).unwrap();
+    let mut small_cfg = config();
+    small_cfg.grid = [32, 32];
+    let empty_small = LatticeMemory::new(small_cfg).unwrap();
+    assert_ne!(empty_a.commitment(), empty_small.commitment(), "geometry is in the header");
+
+    // One extra write moves the commitment; the freeze/thaw identity holds.
+    let x2 =
+        [0.9_f32, 0.1, 0.0, 0.8, 0.2, 0.0, 0.7, 0.3, 0.0, 0.6, 0.4, 0.0, 0.5, 0.5, 0.0, 0.4];
+    let mut c = build();
+    let frozen = c.commitment();
+    let snap = c.snapshot();
+    c.write_delta(&x2, &[0.5_f32; 4], &[0.0, 1.0, 0.0, 0.0], 0.5);
+    assert_ne!(frozen, c.commitment(), "a written byte must move the commitment");
+    c.restore(&snap).expect("restore");
+    assert_eq!(frozen, c.commitment(), "thaw must return the frozen commitment");
+}
+
+#[test]
+fn restore_refuses_mismatched_geometry_and_corrupt_snapshots() {
+    let mut lat = LatticeMemory::new(config()).unwrap();
+    let snap = lat.snapshot();
+
+    // Different geometry → refusal naming both sides.
+    let mut other_cfg = config();
+    other_cfg.grid = [32, 32];
+    let mut other = LatticeMemory::new(other_cfg).unwrap();
+    match other.restore(&snap) {
+        Err(LatticeSnapshotError::GeometryMismatch { expected_cells, found_cells, .. }) => {
+            assert_eq!(expected_cells, 32 * 32);
+            assert_eq!(found_cells, snap.cells.len());
+        }
+        res => panic!("expected GeometryMismatch, got {res:?}"),
+    }
+
+    // Corrupt cursor → refusal.
+    let mut bad_cursor = snap.clone();
+    bad_cursor.cursor = bad_cursor.slab.len() + 1;
+    assert!(matches!(
+        lat.restore(&bad_cursor),
+        Err(LatticeSnapshotError::CursorOutOfBounds { .. })
+    ));
+
+    // A cell claiming past the slab → refusal (a thawed lie can never
+    // reach the hot path's slab indexing).
+    let mut liar = snap.clone();
+    liar.cells[0] = LatticeCell { offset: liar.slab.len() as u32 - 1, len: 8, writes: 1 };
+    assert!(matches!(
+        lat.restore(&liar),
+        Err(LatticeSnapshotError::CellOutOfBounds { .. })
+    ));
+
+    // Every refusal happens before any write: the target is untouched.
+    let untouched = lat.commitment();
+    lat.restore(&bad_cursor).unwrap_err();
+    lat.restore(&liar).unwrap_err();
+    assert_eq!(untouched, lat.commitment(), "a refused restore must not tear state");
 }

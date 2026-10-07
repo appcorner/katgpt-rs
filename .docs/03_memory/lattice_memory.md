@@ -67,6 +67,19 @@ exact recall; `BumpKernel::Tent` is the default, `Cos2` stays selectable with
 its truncation-leak shape pinned (far-tap mass ~0.078 at the primary switch
 where the tent is exactly 0 — the hard ±1-cell support is a tent property).
 
+## Freeze/Thaw (T1.9 — the Plan 199 T1.B consumer surface)
+
+`snapshot()` / `restore()` / `commitment()`: the freeze half produces a
+serde-serializable `LatticeSnapshot` (cells + slab + bump cursor) plus a
+BLAKE3 commitment over the full state (geometry header + cells + slab,
+little-endian — comparable across machines); the thaw is a whole-artifact
+swap — never a blend — validated BEFORE any write (geometry mismatch,
+corrupt cursor, or a cell claiming past the slab are all refused by name, so
+a thawed lie can never reach the hot path's slab indexing). The bump cursor
+is part of the state: post-thaw writes continue claiming from exactly where
+the freeze stopped. Batch-path by design (it clones the slab); the G4
+zero-alloc law covers the hot write/read path only.
+
 ## When To Reach For It
 
 - The consumer's (N, R) fits `N_max ≈ 0.35·d_k·(3.76/R)²` — e.g. ≤ 63k items at

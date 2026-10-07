@@ -22,7 +22,7 @@ use super::cdf::CdfWarp;
 /// `d_k * d_v` for every cell today (kept as a field for variable-shape
 /// futures, exactly as the plan names it). `writes` counts delta-rule
 /// updates — the forgetting axis (overwrite count drives recall decay).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LatticeCell {
     /// First slab element this cell owns.
     pub offset: u32,
@@ -184,6 +184,71 @@ impl core::fmt::Display for LatticeConfigError {
 }
 
 impl std::error::Error for LatticeConfigError {}
+
+/// Serializable state snapshot of a [`super::LatticeMemory`] — the freeze
+/// half of the Plan 199 T1.B consumer surface (`snapshot()` + `commitment()`
+/// produce a BLAKE3-committed artifact; `restore()` is the thaw).
+///
+/// Geometry (grid, `d_k`, `d_v`) is deliberately NOT carried: a snapshot
+/// thaws into a lattice built from the same [`LatticeConfig`], and
+/// [`super::LatticeMemory::restore`] refuses a mismatched shape by length
+/// instead of guessing — the refusal names both sides' numbers.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LatticeSnapshot {
+    /// Dense cell table (`grid[0] × grid[1]` entries; the slab claims).
+    pub cells: Vec<LatticeCell>,
+    /// Flat slab, `cell_count × d_k × d_v` f32 elements.
+    pub slab: Vec<f32>,
+    /// Next unclaimed slab element at snapshot time (allocations continue
+    /// from here after a thaw — the bump cursor is part of the state).
+    pub cursor: usize,
+}
+
+/// Why [`super::LatticeMemory::restore`] refused a snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LatticeSnapshotError {
+    /// The snapshot's cell-table or slab length does not match the target
+    /// lattice — a snapshot from a differently-shaped lattice.
+    GeometryMismatch {
+        expected_cells: usize,
+        found_cells: usize,
+        expected_slab: usize,
+        found_slab: usize,
+    },
+    /// The snapshot's cursor points past its own slab (corrupt artifact).
+    CursorOutOfBounds { cursor: usize, slab_len: usize },
+    /// A written cell claims slab elements past the slab end (corrupt
+    /// artifact) — refused here so the hot path's slab indexing stays
+    /// unchecked-by-construction instead of panicking on a thawed lie.
+    CellOutOfBounds { cell_index: usize, offset: u32, len: u32, slab_len: usize },
+}
+
+impl std::fmt::Display for LatticeSnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GeometryMismatch { expected_cells, found_cells, expected_slab, found_slab } => {
+                write!(
+                    f,
+                    "lattice snapshot geometry mismatch: cells {found_cells} vs expected \
+                     {expected_cells}, slab {found_slab} vs expected {expected_slab} — \
+                     rebuild the lattice from the snapshot's own LatticeConfig"
+                )
+            }
+            Self::CursorOutOfBounds { cursor, slab_len } => {
+                write!(f, "lattice snapshot cursor {cursor} past its own slab length {slab_len} — corrupt snapshot")
+            }
+            Self::CellOutOfBounds { cell_index, offset, len, slab_len } => {
+                write!(
+                    f,
+                    "lattice snapshot cell {cell_index} claims [{offset}, {}) past slab length {slab_len} — corrupt snapshot",
+                    offset + len
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LatticeSnapshotError {}
 
 /// Validation shared by every constructor.
 pub fn validate(config: &LatticeConfig) -> Result<(), LatticeConfigError> {
