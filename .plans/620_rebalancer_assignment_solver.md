@@ -1,6 +1,6 @@
 # Plan 620: katgpt-assign — Spec-Driven Constrained Assignment Solver (Rebalancer distillation)
 
-> **Status:** Active — Phase 1 not started (filed 2026-10-07, post Claude-verdict AGREE; Research 607)
+> **Status:** Active — Phase 1 LANDED 2026-10-07 (`feat:` + `docs:` commits; G1/G2/G4 green, feature OPT-IN per the verdict protocol; Phase 2/3 pending consumers)
 > **Source:** Research 607 (OSDI'24 Rebalancer, facebook/rebalancer @ e4c35517980d893849275f71b3cb90f81164b6d5)
 > **Consumers:** riir-chain Issue 164 (primary — shard_assignment solver); riir-rethink Issue 029 (candidate; closed 2026-10-07 — record: riir-rethink HISTORY.md, the promote triggers folded there)
 
@@ -8,23 +8,23 @@
 
 New leaf member crate **`katgpt-assign`** — std-only, alloc allowed, **zero external deps, zero workspace deps** (sits upstream of `katgpt-core`; core takes it as an optional path dep and re-exports `katgpt_core::assign` behind the opt-in `assignment` feature — the `katgpt-dec` → `katgpt_core::dec` precedent). Run the `boundary-guard` skill BEFORE the crate lands. Integer determinism is a G1 requirement from the first commit — the API never carries float accumulation, so it can't be retrofitted.
 
-- [ ] Run `boundary-guard` (allowlist + domain read for a new member crate; confirm zero-dep posture)
-- [ ] Scaffold `crates/katgpt-assign` (workspace member; `types.rs` for decoupled structs per repo convention)
-- [ ] Types: `Problem` (objects/containers as dense `u32` indices; `Dimension` values `i64`; flat scopes; `Group` reserved for Phase 2), `Assignment` (dense `Vec<u32>` object→container), `Seed` (u64)
-- [ ] Expression DAG: `Lookup` leaves (shared per (dimension, container)) + `Sum` + `Max` internal nodes; per-node cached `i64` value; leaf-affectance maps `M_o` (object→leaves), `M_b` (container→leaves); evaluate-const / apply-mutate split
-- [ ] Specs (constraint-or-goal duality; broken constraint → fix-it goal + never-worse guard, paper defaults 100/10000): `Capacity` (scope-item util ≤ limit) · `Balance` (minimize util spread across scope items) · `MinimizeMovement` (penalize moved objects vs initial)
-- [ ] Fold all per-container constraint rows into one root via `Max` (linear graph size)
-- [ ] Local search: strict improvement (`obj_δ ≤ 0` signed integer folding violation + objective delta), **hot-container ordering** from node potentials (the paper's measured win — keep), move types `Single` + `Swap`, deterministic seeded tie-breaks, time + move limits
-- [ ] Determinism test (G1): same input + same seed ⇒ byte-identical `Assignment` across runs AND across `Vec` iteration-order perturbations; no HashMap probe-order dependence anywhere in move generation
-- [ ] G1 correctness fixtures: feasibility under Capacity; objective ≤ initial on every fixture; improvement-vs-greedy-init sanity; constraint-violation fallback behavior
-- [ ] G2 outside-baseline bench (`--release`, box-state provenance line per the latency-claim rule):
-  - [ ] vs greedy / first-fit-decreasing on the same instances (quality + wall time) — workspace precedent `riir-rag/src/packer.rs`
-  - [ ] optimality gap vs brute force, n ≤ 12 (exhaustive)
-  - [ ] mid-size lower-bound gap, n ≈ 100–1000 (capacity-relaxation bound, or Hungarian on the pure-assignment subset)
-  - [ ] NO-GO clause: greedy ≈ local search at target sizes (≤ ~50k objects) within tolerance + latency ⇒ record NEGATIVE, primitive stays opt-in forever / dropped; delta-vs-full-recompute recorded as diagnostic only, never a gate
-- [ ] G4: hot loop alloc-free under the repo's counting allocator (`debug_assertions`-gated per Issue 856)
-- [ ] `cargo clippy` clean (healer-first for mechanical findings); feature-gated re-export compiles at BOTH postures (`assignment` on/off)
-- [ ] README block in the crate + one line in the workspace members list
+- [x] Run `boundary-guard` (allowlist + domain read for a new member crate; confirm zero-dep posture) — domain read as written (modelless, zero deps, upstream); Owns bullet added to BOUNDARY.md (the katgpt-device-verify widening precedent); scoped contract run post-landing
+- [x] Scaffold `crates/katgpt-assign` (workspace member; `types.rs` for decoupled structs per repo convention)
+- [x] Types: `Problem` (objects/containers as dense `u32` indices; `Dimension` values `i64`; flat scopes; `Group` reserved for Phase 2), `Assignment` (dense `Vec<u32>` object→container), `Seed` (u64)
+- [x] Expression DAG: `Lookup` leaves (shared per (dimension, container)) + `Sum` + `Max` internal nodes; per-node cached `i64` value; leaf-affectance maps `M_o` (object→leaves), `M_b` (container→leaves); evaluate-const / apply-mutate split — plus `Affine{k,c}` and `LeafMoved` (the minimal faithful encoding of MinimizeMovement); parents CSR for upward delta propagation
+- [x] Specs (constraint-or-goal duality; broken constraint → fix-it goal + never-worse guard, paper defaults 100/10000): `Capacity` (scope-item util ≤ limit) · `Balance` (minimize util spread across scope items) · `MinimizeMovement` (penalize moved objects vs initial) — DEVIATIONS RECORDED: (a) a secondary sum-of-rows repair term rides the goal side (identically 0 at feasibility; measured — the Max fold alone stalls on tied-at-worst plateaus, perfect_balance froze at violation 10400); (b) sideways (δ=0) moves are DEFAULT-ON with a 25k budget + heat>0-source + immediate-reversal guards — the plan's `obj_δ ≤ 0` window is load-bearing for Max-fold ties
+- [x] Fold all per-container constraint rows into one root via `Max` (linear graph size)
+- [x] Local search: strict improvement (`obj_δ ≤ 0` signed integer folding violation + objective delta), **hot-container ordering** from node potentials (leaf-side heat approximation — violation mass + balance deviation; the paper's measured win kept), move types `Single` + `Swap`, deterministic seeded tie-breaks, time + move limits (time advisory-only: breaks cross-machine byte-determinism, documented)
+- [x] Determinism test (G1): same input + same seed ⇒ byte-identical `Assignment` across runs AND across `Vec` iteration-order perturbations (spec-order rotation); no HashMap probe-order dependence anywhere in move generation
+- [x] G1 correctness fixtures: feasibility under Capacity; objective ≤ initial on every fixture; improvement-vs-greedy-init sanity; constraint-violation fallback behavior — PLUS the delta-evaluation property test (incremental root == full recompute, the exactness claim replacing Meta's segment tree)
+- [x] G2 outside-baseline bench (`--release`, box-state provenance line per the latency-claim rule):
+  - [x] vs greedy / first-fit-decreasing on the same instances (quality + wall time) — workspace precedent `riir-rag/src/packer.rs` — **local dominates FFD on every fixture (3–47× better folded objective; exact optima on both known-optimum families)**
+  - [x] optimality gap vs brute force, n ≤ 12 (exhaustive) — tiny-instance gap 0 (one-fixture tolerance documented in-test)
+  - [x] mid-size lower-bound gap, n ≈ 100–1000 (capacity-relaxation bound, or Hungarian on the pure-assignment subset) — pigeonhole LB on max-util: solver sits on/above the bound (sanity) and ≤ FFD's max-util; gap-to-bound reported in Bench 924 (bound not tight for this family — reported, not asserted)
+  - [x] NO-GO clause: NOT TRIGGERED (greedy loses 3–47× at target sizes) — primitive stays opt-in pending the consumer per the verdict protocol; delta-vs-full-recompute recorded as diagnostic (delta-property test pins bit-identity)
+- [x] G4: hot loop alloc-free under the repo's counting allocator (`debug_assertions`-gated per Issue 856 — `any(debug_assertions, feature = "alloc_tracking")`, the Issue-741 profile-free posture)
+- [x] `cargo clippy` clean (healer-first for mechanical findings — `cargo refine` applied 3, manual 4); feature-gated re-export compiles at BOTH postures (`assignment` on/off verified via cargo check + cargo tree)
+- [x] README block in the crate + one line in the workspace members list (+ README crate-count/flag-count sites, count_features gate green)
 
 ## Phase 2 — only after G1/G2 pass vs outside baselines
 

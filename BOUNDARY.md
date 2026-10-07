@@ -15,6 +15,17 @@
   the public funnel per Research 003. No training, no backprop, no gradient
   descent; runtime weight mutations limited to freeze/thaw, deterministic
   raw/lora hot-swap, latent-space updates.
+- **Spec-driven constrained assignment solver** (`katgpt-assign`, Plan 620 /
+  Research 607 — the OSDI'24 Rebalancer distillation): objects → containers
+  under capacity/balance/movement specs over an integer expression DAG with
+  strict-improvement local search and byte-identical per-seed determinism.
+  Admitted on the domain test read as written: *modelless*, *zero deps*, no
+  riir dep, upstream of everything. It is an **optimization/verification**
+  primitive rather than an *inference* primitive — a widening of the Owns
+  line recorded here rather than waved through (the `katgpt-device-verify`
+  precedent); the load-bearing half is the same: integer-deterministic output
+  fit for the consensus replay path (consumer riir-chain Issue 164, Phase 3
+  of the plan — its own repo's issue, not this repo's code).
 - **`no_std` device-side verification primitives** (`katgpt-device-verify`) —
   fair-roll die verification and binary-Merkle inclusion verification for the
   `Satellite` tier (`riir-chain` Issues 108/109, this repo's Issue 685; the
