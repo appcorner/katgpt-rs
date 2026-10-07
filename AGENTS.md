@@ -371,6 +371,17 @@ never quote an error rate without naming the instrument the sample was
 adjudicated against (measured: a census's "wrong address" was correct; the
 oracle was blind to heading-only allocations).
 
+**The two-lane gap** (Issue 921 Arm B): a repo whose kind dir carries
+`.highwater_local` declares its local lane's top, and citations in
+`counter < n < smallest git-log file ADD above it` classify CROSS/ORPHAN
+instead of IN-LOCAL-RANGE — the floor derives from git-log ADDITIONS only
+(never the worktree walk, never heading allocations, whose additions are
+order-dependent), prints on the per-repo line, `.highwater_local` rides the
+sweep's dirty/upstream advisory patterns, and `citation_drift_sweep.py
+--prove-fires` replays the founding specimen two-sided at the riir-infer
+fixtures (a local clone, not an archive extraction — the floor leg is a
+git-log leg). Repos without the file are byte-identical in behavior.
+
 **The heading oracle** (Issues 781, 823, 828): `heading_allocated()` is not a
 complete record — records headed in styles the pattern cannot spell are
 unread, and the class was anchored three times (POSITION, then the blindness
