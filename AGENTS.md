@@ -1369,5 +1369,8 @@ the witness, armed on every push (Issue 850).
 directly on `develop` per the global rule.
 
 ## Models
-- riir-train/data/gemma-2-2b-it-f16.gguf
-- riir-train/data/MiniCPM5-1B-F16.gguf
+- riir-train/data/gemma-2-2b-it-f16.gguf — RETIRED locally 2026-10-07 (riir-train Issue 617,
+  after the loud-fail gate edits); restore with `./scripts/data_backup.sh pull
+  data/gemma-2-2b-it-f16.gguf` from the riir-train root. The katgpt-attn spike-census
+  sidecars stay committed (the fixture gate reads sidecars, not the GGUF).
+- riir-train/data/MiniCPM5-1B-F16.gguf — LOCAL-KEEP (pin, re-downloadable).
