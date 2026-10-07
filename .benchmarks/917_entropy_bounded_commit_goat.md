@@ -65,3 +65,43 @@ EB vs the FAIR incumbent (τ = 0.9 with the singleton floor) across three indepe
 ## Next
 
 Issue 917 T2/T3 (lane wiring) and the lane G2/G3 need a trained D2F checkpoint (riir-train) or a drafter lane with a real model; the PEAKED-INDEP cost says the lane A/B must report the per-pass commit count distribution, not just mean NFE.
+
+## T3 lane wiring (2026-10-07, opt-in `entropy_bounded_commit`)
+
+**Status:** MEASURED — counts-only bench landed (`benches/bench_917_eb_lane_wiring.rs`, `--release`, seeded synthetic marginals, no timing); the lane G2/G3 (quality at matched compute) still need a real drafter. Wiring record: the issue's T3 checkbox.
+
+Wiring: `crates/katgpt-speculative/src/entropy_bounded.rs` — `build_dd_tree_eb{,_into}` (per-expansion child count = the EB prefix over candidate children's marginal surprisals `−ln p`; best-first order untouched) and `dflash_block_commit_eb_with` / `dflash_predict_eb_with` (per-depth stats via `position_stats`, committed prefix `Σ H − max H ≤ γ`, argmax tokens of committed depths in ascending depth order). Fixed width-k = the same policy with `γ = ∞, cap = k` (the T1 oracle bench's identity), so both arms share one code path.
+
+DDTree counts (D=8, V=64, budget=64, patience off; nodes / expansions / total children / mean children per expansion):
+
+| arm | FLAT | PEAKED | RANDOM |
+|---|---|---|---|
+| ALL (shipped width) | 64 / 65 / 4160 / 64.00 | 64 / 64 / 4096 / 64.00 | 64 / 65 / 4160 / 64.00 |
+| fixed k=1 | 8 / 8 / 8 / 1.00 | 8 / 8 / 8 / 1.00 | 8 / 8 / 8 / 1.00 |
+| fixed k=4 | 64 / 65 / 260 / 4.00 | 64 / 64 / 256 / 4.00 | 64 / 65 / 260 / 4.00 |
+| fixed k=8 | 64 / 65 / 520 / 8.00 | 64 / 64 / 512 / 8.00 | 64 / 65 / 520 / 8.00 |
+| EB γ=0.1 cap=8 | 8 / 8 / 8 / 1.00 | 8 / 8 / 8 / 1.00 | 8 / 8 / 8 / 1.00 |
+| EB γ=1.0 cap=8 | 8 / 8 / 8 / 1.00 | 64 / 56 / 112 / 2.00 | 8 / 8 / 8 / 1.00 |
+| EB γ=5.0 cap=8 | 64 / 65 / 130 / 2.00 | 64 / 64 / 256 / 4.00 | 64 / 65 / 130 / 2.00 |
+
+DFlash block commit (steps=8, V=64, 2000 seeded blocks per arm; mean / max committed per block):
+
+| arm | FLAT | PEAKED | RANDOM |
+|---|---|---|---|
+| ALL (commit-all) | 8.00 / 8 | 8.00 / 8 | 8.00 / 8 |
+| fixed k=4 | 4.00 / 4 | 4.00 / 4 | 4.00 / 4 |
+| EB γ=0.1 cap=8 | 1.00 / 1 | 1.00 / 1 | 1.00 / 1 |
+| EB γ=1.0 cap=8 | 1.00 / 1 | 1.00 / 1 | 1.00 / 1 |
+| EB γ=5.0 cap=8 | 2.00 / 2 | 2.00 / 2 | 2.00 / 2 |
+
+Reading:
+
+- **The adaptive claim shows in the counts, not just the dial.** EB(γ=5, cap=8) commits a DIFFERENT effective width per family — mean 2.00/expansion on FLAT and RANDOM rows, 4.00 on PEAKED (exactly matching fixed k=4 there) — while any fixed k is constant across families. At γ ≤ 0.3 EB rides the safe fixed-k=1 end everywhere (the singleton floor: no pass is ever wasted), which is the no-stall property the shipped all-children and τ paths lack on the DFlash side.
+- **The γ scale differs per lane by construction.** DDTree runs the residual on per-child surprisals `−ln p` (row-local, unbounded by ln V); DFlash runs it on `position_stats` entropies of the block rows — and `position_stats` reads a row as LOGITS, so the drafted softmaxed probabilities get softmaxed again in the stats kernel. That double-softmax flattens peaked rows (a 0.7/0.15/0… probability row reads as ≈62 equal-mass entries, H ≈ 4+ nats), which is why DFlash EB needs larger γ than the D2F-style logits lane will. The issue's T3 line prescribes `position_stats` on the block's marginals verbatim, so the wiring follows it; if a real-drafter A/B finds the double-softmax profile unwanted, the fix is a logits-preserving `dflash_predict` variant feeding the same commit — one call-site change, not a policy change.
+- **Not a promotion basis.** Counts are box-independent by design; the γ dial is not calibrated (the T1 oracle bench's caveat carries over), and G2/G3 need the Plan 437 checkpoint (T2) or a real drafter A/B.
+
+```sh
+CARGO_TARGET_DIR=/tmp/eb_t3_target cargo test -p katgpt-speculative \
+  --features entropy_bounded_commit \
+  --bench bench_917_eb_lane_wiring --release -- --nocapture
+```
