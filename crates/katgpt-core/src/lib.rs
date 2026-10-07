@@ -370,6 +370,15 @@ pub use conformal::{
 pub mod coda;
 #[cfg(feature = "dec_operators")]
 pub use katgpt_dec as dec;
+// Plan 620 (2026-10-07): the spec-driven constrained assignment solver —
+// objects into containers under capacity/balance/movement specs over an
+// integer expression DAG, strict-improvement local search with delta
+// evaluation, byte-identical determinism per seed (the raw-domain
+// requirement for anything crossing SyncBlock → ChainConsensus; primary
+// consumer riir-chain Issue 164). OPT-IN pending the GOAT gate + consumer
+// wiring per the plan's verdict protocol (the katgpt-dec precedent).
+#[cfg(feature = "assignment")]
+pub use katgpt_assign as assign;
 #[cfg(feature = "dec_operators")]
 pub mod dec_freeze;
 #[cfg(feature = "dec_operators")]
