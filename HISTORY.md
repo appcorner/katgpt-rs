@@ -2,6 +2,23 @@ Compacted 2026-10-06: every `##` heading kept verbatim, one compact entry per
 record (≤2 short lines); the full pre-compaction text is in git history.
 Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## Issue 921 (2026-10-07 → closed 2026-10-07) — citation oracle two-lane self-reference blind spot: CLOSED — Arm B landed, corpus repaired, sweep green (file removed per noise-reduction)
+
+riir-infer's nine IN-LOCAL-RANGE rows were narrated-only local-lane numbers
+(004–009 never existed as files on any ref, either box). Owner verdict: Arm B
+(two-lane gap via `.highwater_local`) LANDED; Arm A (own-name heading variant)
+and Arm C (accept the red) REJECTED by verdict. Hash-pinned: corpus repair —
+`f0191e3` (qualify `riir-ai Issue 980`) + `71c8eed` (six self-allocation
+headings rewritten into the readable date-led grammar, AGENTS.md grammar rule
+pinned) in riir-infer; Arm B `3249672d1` here (`citation_drift_sweep.py`
+two-lane gap boundary + two-sided `--prove-fires`; ILR 9→0, novel 3→0,
+`max_in_local_range: 0` pin holds; gap rows carry a `[two-lane gap …]` note;
+`.highwater_local` rides both advisory patterns). Normative design lives in
+AGENTS.md (§the heading oracle / the two-lane gap). The two ghost proposal
+citations (numbers 17 and 13 — rows in riir-dapps / riir-instinct docs naming
+proposals owned elsewhere; full rows in this file's git-recovered 921 record)
+remain owner-gated.
+
 ## Issue 919 (2026-10-06 → closed 2026-10-07) — spike census + delimiter-sink PoC: CLOSED — census channel key REFUTED; measured-diagonal KV exemption + delimiter folding both NO-GO (file removed per noise-reduction)
 
 Filed from Research 605 (arXiv:2603.05498). Nothing promoted; three
