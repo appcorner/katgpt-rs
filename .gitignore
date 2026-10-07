@@ -48,3 +48,6 @@ scripts/repo_alias.local.txt
 
 # cargo-refine machine-local state (trajectories, fixseq, outbox, active-set)
 .refine/
+
+# session run scratch (gate out/err logs)
+.runs/
