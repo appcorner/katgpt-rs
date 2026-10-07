@@ -28,6 +28,8 @@ Issue 164 minimum).
 | rand_20000x100 | 3,778 | 24,000 | **3,228** | 12,000 | **1,755** | 58 | 10,000,384 |
 | rand_20000x200_4d | 3,718 | 18,000 | **3,455** | 4,500 | **1,033** | 65 | 10,000,384 |
 | repair_10c_L1000_e50 | 50,005,000 | 50 | **1 (optimum)** | 1,000 | 1,000 | **1** (FFD 50) | 1,121 |
+| shard_256x8 (Issue 164 shape) | 5,553 | 28,325 | **165** | 18,326 | **3** | **53** (FFD 224) | 8,442,306 |
+| shard_1024x16 (Issue 164 shape) | 22,550 | 113,691 | **5,819** | 73,508 | **3,707** | **92** (FFD 960) | 10,000,384 |
 
 Reading notes:
 
@@ -39,6 +41,13 @@ Reading notes:
 - **repair family**: the known optimum is movement 1 (move the fat object);
   FFD-style construction cannot see it (50 moves — it rebuilds from scratch),
   the solver finds it in 1,121 evaluations.
+- **shard family** (the riir-chain Issue 164 cluster shape: 2 load dims
+  with town/wilderness block skew, round-robin hand initial, movement
+  weight 3): the solver takes the hand assignment's spread 3671 → **3** at
+  256 shards (1224×) / 15061 → 3707 at 1024 (4×), while relocating only
+  **53/256 = 21%** and **92/1024 = 9%** of the shards — the
+  don't-teleport-the-world property the issue demands (FFD rebuilds move
+  224/960 and balance WORSE than the hand round-robin it replaces).
 - **Feasibility**: violation_root = 0 on every fixture at every size (the
   random family's capacities leave slack by construction; the infeasible-tail
   behavior is covered by the G1 infeasible-fixture test).
@@ -94,6 +103,8 @@ PROVENANCE: power=AC Power load=6.83 swap=6164.88M canary=skipped powermode=2(hi
 | rand_20000x100 | 7,481 |
 | rand_20000x200_4d | 24,679 |
 | repair_10c_L1000_e50 | 0.18 |
+| shard_256x8 | 3,379 |
+| shard_1024x16 | 8,256 |
 
 Scale reading (provisional): ~400k evaluations/s under load with the default
 (single-threaded, deterministic) configuration; the 10M-eval cap binds the

@@ -175,6 +175,21 @@ fn main() {
         16,
     );
 
+    // riir-chain shard topology (Issue 164 — the consumer's cluster shape:
+    // hand round-robin vs FFD rebuild vs solver rebalance).
+    run_case(
+        &mut rows,
+        "shard_256x8",
+        &fixtures::shard_topology(21, 256, 8),
+        21,
+    );
+    run_case(
+        &mut rows,
+        "shard_1024x16",
+        &fixtures::shard_topology(22, 1024, 16),
+        22,
+    );
+
     println!(
         "{:<24} {:<7} {:>12} {:>10} {:>8} {:>7} {:>10} {:>9} {:>10}",
         "fixture",

@@ -115,6 +115,57 @@ pub fn random_instance(
     }
 }
 
+/// The riir-chain cluster shape (Issue 164 — the primary consumer's bench
+/// instance): objects = map shards with two integer load dims (NPC density,
+/// tick cost — block-skewed across map ids, the realistic shape: town maps
+/// carry most NPCs), containers = nodes with one capacity per dim
+/// (katgpt-assign specs are uniform-limit, so heterogeneous node classes
+/// are modeled by sizing the limit at the SMALL class — the binding
+/// constraint), initial = round-robin (the naive hand assignment the
+/// operator would write by hand). Specs: both capacities + both balances +
+/// movement (weight 3 — a rebalance that teleports the whole world is
+/// worse than a slightly unbalanced stable one, exactly the issue's
+/// framing).
+pub fn shard_topology(seed: u64, num_shards: usize, num_nodes: usize) -> Problem {
+    assert!(num_nodes >= 2);
+    let mut rng = SplitMix64::new(seed);
+    let mut demands = Vec::with_capacity(num_shards * 2);
+    for m in 0..num_shards {
+        // Block skew: within each 16-map block the early ids are hot
+        // (towns), the tail cold (wilderness) — a 10:1 head-to-tail ratio.
+        let hot = 1000 / (1 + m % 16) as i64;
+        let npc = 10 + hot / 4 + rng.below(20) as i64;
+        let tick = 5 + hot / 8 + rng.below(12) as i64;
+        demands.push(npc);
+        demands.push(tick);
+    }
+    let total_npc: i128 = demands.iter().step_by(2).map(|&x| x as i128).sum();
+    let total_tick: i128 = demands[1..].iter().step_by(2).map(|&x| x as i128).sum();
+    // Uniform capacity at the small-node class with ~20% slack: the
+    // even-share × objects-per-node × 1.2 bound.
+    let per_node_objects = num_shards.div_ceil(num_nodes) as i128;
+    let ram_cap = (total_npc * per_node_objects * 12 / 10 / num_nodes as i128).max(1) as i64;
+    let tick_cap = (total_tick * per_node_objects * 12 / 10 / num_nodes as i128).max(1) as i64;
+    // Round-robin initial (the hand assignment).
+    let initial: Vec<ContainerId> = (0..num_shards)
+        .map(|m| (m % num_nodes) as ContainerId)
+        .collect();
+    Problem {
+        num_objects: num_shards,
+        num_containers: num_nodes,
+        num_dims: 2,
+        demands,
+        initial,
+        specs: vec![
+            Spec::capacity(0, ram_cap),
+            Spec::capacity(1, tick_cap),
+            Spec::Balance { dim: 0, weight: 1 },
+            Spec::Balance { dim: 1, weight: 1 },
+            Spec::MinimizeMovement { weight: 3 },
+        ],
+    }
+}
+
 /// A movement-dominated repair instance: container 0 holds one fat object
 /// (demand `limit`) plus `excess_objects` unit stragglers — over capacity
 /// by exactly `excess_objects` — and every other container is EMPTY.
