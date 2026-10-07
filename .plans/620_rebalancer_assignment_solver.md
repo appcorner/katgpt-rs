@@ -25,6 +25,7 @@ New leaf member crate **`katgpt-assign`** — std-only, alloc allowed, **zero ex
 - [x] G4: hot loop alloc-free under the repo's counting allocator (`debug_assertions`-gated per Issue 856 — `any(debug_assertions, feature = "alloc_tracking")`, the Issue-741 profile-free posture)
 - [x] `cargo clippy` clean (healer-first for mechanical findings — `cargo refine` applied 3, manual 4); feature-gated re-export compiles at BOTH postures (`assignment` on/off verified via cargo check + cargo tree)
 - [x] README block in the crate + one line in the workspace members list (+ README crate-count/flag-count sites, count_features gate green)
+- [x] Bench-target disposition (the `suite_membership_audit` open note): `bench_924_assignment_g2_baselines` (`harness = false`) is named by no suite — CORRECT BY DESIGN, no suite row added. The audit's scope is TEST targets only; benches are the Issue-834 standing skip class (one-time measurement records — Bench 924 owns the numbers; a re-gate re-runs the bench by name in its command line).
 
 ## Phase 2 — only after G1/G2 pass vs outside baselines
 
